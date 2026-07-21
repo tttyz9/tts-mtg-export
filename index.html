@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TTS 万智牌导出工具 · 中文卡图版</title>
+  <link rel="preconnect" href="https://api.scryfall.com" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 顶部导航 -->
+  <nav class="nav">
+    <div class="nav-left">
+      <span class="logo" aria-hidden="true">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="5" y="2" width="22" height="28" rx="3" fill="#FFFCF7" stroke="#7C3AED" stroke-width="2"/>
+          <circle cx="16" cy="11" r="4" fill="#7C3AED"/>
+          <rect x="9" y="19" width="14" height="1.5" fill="#7C3AED" opacity="0.7"/>
+          <rect x="9" y="23" width="10" height="1.5" fill="#7C3AED" opacity="0.5"/>
+          <rect x="9" y="26" width="8" height="1.5" fill="#7C3AED" opacity="0.3"/>
+        </svg>
+      </span>
+      <span class="wordmark">TTS 万智牌导出工具</span>
+    </div>
+    <div class="nav-right">
+      <a href="#help" class="nav-link">使用帮助</a>
+      <a href="https://github.com" target="_blank" rel="noopener" class="nav-link accent">GitHub</a>
+    </div>
+  </nav>
+  <div class="nav-divider"></div>
+
+  <!-- 主内容区 -->
+  <main class="main-row">
+    <!-- 左侧导入区 -->
+    <section class="left-col">
+      <h1 class="section-label">导入牌表</h1>
+
+      <div class="tab-bar" role="tablist">
+        <button class="tab active" id="tabText" role="tab" aria-selected="true">牌表输入</button>
+        <button class="tab disabled" id="tabUrl" disabled role="tab" aria-selected="false">
+          URL 导入 <span class="soon">即将推出</span>
+        </button>
+      </div>
+
+      <div class="textarea-wrap">
+        <div class="textarea-header">
+          <span class="ta-title">牌表内容</span>
+          <span class="ta-count" id="inputCount">0 行 · 0 字</span>
+        </div>
+        <textarea id="deckInput" spellcheck="false" placeholder="1 Sol Ring (CMR) 369&#10;4 Lightning Bolt (MH2) 143&#10;2 Counterspell (M21) 71&#10;3 Thoughtseize (THB) 84&#10;17 Island (ELD) 254"></textarea>
+      </div>
+
+      <div class="options-row">
+        <label class="opt">
+          <input type="checkbox" id="optFix" checked />
+          <span>自动修复错误</span>
+        </label>
+        <label class="opt">
+          <input type="checkbox" id="optZh" checked />
+          <span>优先中文版本</span>
+        </label>
+        <label class="opt" title="自动检测牌表中会生成的指示物，并一并导出到 TTS">
+          <input type="checkbox" id="optToken" checked />
+          <span>自动导入指示物</span>
+        </label>
+      </div>
+
+      <div class="action-row">
+        <button class="btn-primary" id="importBtn">
+          <svg class="icon" width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M8 2V11M8 2L4 6M8 2L12 6M2 13H14" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          导入牌表
+        </button>
+        <button class="btn-secondary" id="clearBtn">清空</button>
+      </div>
+
+      <p class="import-status" id="importStatus"></p>
+    </section>
+
+    <!-- 右侧预览区 -->
+    <aside class="right-col">
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-val" id="statTotal">0</div>
+          <div class="stat-label">总卡数</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val" id="statTypes">0</div>
+          <div class="stat-label">卡牌种类</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val" id="statTokens">0</div>
+          <div class="stat-label">指示物</div>
+        </div>
+      </div>
+
+      <div class="preview-head">
+        <h2 class="preview-title">卡牌预览</h2>
+        <span class="preview-sub">卡图来源：大学院废墟</span>
+      </div>
+
+      <div class="card-grid" id="cardGrid">
+        <!-- 卡牌由 JS 按页生成 -->
+      </div>
+
+      <div class="preview-pager">
+        <button class="pager-btn" id="prevPage" disabled>‹ 上一页</button>
+        <span class="pager-indicator" id="pageInd">第 1 / 1 页</span>
+        <button class="pager-btn" id="nextPage" disabled>下一页 ›</button>
+      </div>
+      <div class="card-count" id="cardCount">显示 0 / 0 张</div>
+
+      <div class="export-section">
+        <button class="btn-export" id="exportBtn" disabled>
+          <svg class="icon" width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M9 2V12M9 12L4.5 7.5M9 12L13.5 7.5M2 15H16" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          导出 TTS JSON
+        </button>
+        <button class="btn-print" id="printBtn" disabled>
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
+            <polyline points="6 9 6 2 18 2 18 9"></polyline>
+            <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+            <rect x="6" y="14" width="12" height="8"></rect>
+          </svg>
+          打印卡图 (A4)
+        </button>
+        <p class="export-hint">将导出文件放入 TTS 存档对象文件夹即可使用</p>
+      </div>
+    </aside>
+  </main>
+
+  <!-- 帮助区 -->
+  <div class="help-divider" id="help"></div>
+  <section class="help-section">
+    <h2 class="help-title">使用帮助</h2>
+    <div class="help-cols">
+      <div class="help-col">
+        <h3 class="help-col-title">支持的牌表网站</h3>
+        <p class="help-col-text">Moxfield<br/>Archidekt<br/>MTGGoldfish<br/>deckstats.net<br/>TappedOut</p>
+      </div>
+      <div class="help-col">
+        <h3 class="help-col-title">TTS 存档路径</h3>
+        <p class="help-col-text mono">Windows:<br/>Documents/My Games/Tabletop Simulator/Saves/Saved Objects/<br/><br/>Mac:<br/>~/Library/Tabletop Simulator/Saves/Saved Objects</p>
+      </div>
+      <div class="help-col">
+        <h3 class="help-col-title">牌表格式示例</h3>
+        <div class="format-box mono">1 Sol Ring (CMR) 369<br/>4 Lightning Bolt (MH2) 143<br/>3 Thoughtseize (THB) 84<br/>17 Island (ELD) 254</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="footer-divider"></div>
+  <footer class="footer">
+    <span class="footer-attr">卡图来源：大学院废墟 · 仅供桌游模拟器使用</span>
+    <div class="footer-links">
+      <a href="https://www.mtgch.com" target="_blank" rel="noopener">大学院废墟</a>
+      <a href="https://berserk-games.com/tabletop-simulator/" target="_blank" rel="noopener">Tabletop Simulator</a>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

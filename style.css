@@ -338,27 +338,12 @@ body {
   border-radius: 6px;
   overflow: hidden;
   background: linear-gradient(135deg, #efe7da, #e3d8c8);
-  cursor: zoom-in;
   transition: transform 0.12s, box-shadow 0.12s;
 }
 .card-cell:hover {
   transform: translateY(-2px);
   box-shadow: 0 6px 18px rgba(45, 27, 78, 0.28);
   z-index: 2;
-}
-
-/* 悬浮放大：跟随鼠标显示的大图 */
-.card-zoom {
-  position: fixed;
-  width: 268px;
-  height: 374px;
-  object-fit: cover;
-  border-radius: 10px;
-  border: 2px solid var(--primary);
-  background: #fff;
-  box-shadow: 0 14px 44px rgba(45, 27, 78, 0.5);
-  pointer-events: none;
-  z-index: 10000;
 }
 .card-cell img {
   position: absolute;

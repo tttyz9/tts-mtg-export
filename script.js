@@ -264,6 +264,7 @@ async function lookupCard(name, set, autoFix) {
         name: info.name,
         oracleId: info.oracle_id || null,
         set: info.set || null,
+        setName: info.set_name || null,
         collectorNumber: info.collector_number || null,
         // 该卡在游戏中会生成的指示物（来自 all_parts 中 component === "token"）
         tokens: (info.all_parts || [])
@@ -519,8 +520,26 @@ async function importDeck() {
     inst.oracleId = info?.oracleId || null;
     inst.set = info?.set || inst.set; // 用查到的实际系列/编号作为「当前印刷」
     inst.collectorNumber = info?.collectorNumber || null;
-    inst.allPrintings = []; // 印刷列表稍后异步加载
+    // 立即把「当前印刷」种入 allPrintings（来自 lookupCard 结果），
+    // 保证下拉框一定出现（参考 mtgprint.net：每张卡都有选择器，默认选中当前印刷）。
+    // 后台再异步补充该卡的全部印刷版本；即使补充失败，下拉框也不会消失。
+    if (info) {
+      inst.allPrintings = [
+        {
+          id: info.id,
+          name: info.name,
+          set: info.set,
+          setName: info.setName || info.set,
+          collectorNumber: info.collectorNumber,
+          enUrl: info.enUrl,
+          oracleId: info.oracleId,
+        },
+      ];
+    } else {
+      inst.allPrintings = [];
+    }
     inst.selectedPrintingIdx = 0;
+    inst._printingsFull = false; // 后台完整列表尚未加载
   });
 
   const totalCount = instances.length;
@@ -606,22 +625,25 @@ async function loadPrintings(oracleIdList, cardInstances, gen) {
   let failed = 0;
   await mapLimit(oracleIdList, 4, async (oid) => {
     if (gen !== currentLoadGen) return; // 已被新的导入取代，放弃本批
-    let prints = [];
+    let prints = null;
     try {
       prints = await fetchAllPrintings(oid);
     } catch (e) {
       failed++;
-      console.warn("印刷版本获取失败（已降级为空）：", oid, e);
-      prints = []; // 本次降级；未缓存，下次/重导可重试
+      console.warn("印刷版本获取失败（保留当前印刷下拉）：", oid, e);
+      prints = null; // 失败：保留已 seed 的当前印刷，下拉框不消失、可重导重试
     }
-    // 写入所有该 oracleId 的卡牌实例
-    for (const inst of cardInstances) {
-      if (inst.oracleId === oid) {
-        inst.allPrintings = prints;
-        const curIdx = prints.findIndex(
-          (p) => p.set === inst.set && p.collectorNumber === inst.collectorNumber
-        );
-        inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
+    // 仅当拿到完整列表时才替换（printings 为空也保留 seed 的当前印刷）
+    if (prints && prints.length) {
+      for (const inst of cardInstances) {
+        if (inst.oracleId === oid) {
+          inst.allPrintings = prints;
+          inst._printingsFull = true;
+          const curIdx = prints.findIndex(
+            (p) => p.set === inst.set && p.collectorNumber === inst.collectorNumber
+          );
+          inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
+        }
       }
     }
     if (gen === currentLoadGen) patchVisiblePrintingSelects(oid);
@@ -634,12 +656,19 @@ async function loadPrintings(oracleIdList, cardInstances, gen) {
   );
 }
 
-// 为当前页中匹配该 oracleId、且尚未添加下拉框的卡格补上下拉
+// 为当前页中匹配该 oracleId 的卡格补/更新下拉：
+//  - 尚无下拉 → 新建（可能是已 seed 的「仅当前印刷」版）
+//  - 已有下拉但仍是「仅当前印刷」版，且完整列表已到达 → 替换为完整版
 function patchVisiblePrintingSelects(oid) {
   for (const wrap of cardGrid.children) {
     const inst = wrap._inst;
     if (!inst || inst.oracleId !== oid) continue;
-    if (wrap.querySelector(".printing-select")) continue;
+    const existing = wrap.querySelector(".printing-select");
+    // 已是完整版（选项数 ≥ 完整列表数）则无需重建
+    if (existing && inst._printingsFull && existing.options.length >= inst.allPrintings.length) {
+      continue;
+    }
+    if (existing) existing.remove();
     const sel = buildPrintingSelect(inst);
     if (sel) wrap.appendChild(sel);
   }

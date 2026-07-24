@@ -59,7 +59,138 @@ const statTokens = $("statTokens");
 let deckData = null; // { instances, totalCount, typeCount }
 let previewInstances = [];
 let currentPage = 0;
-const PAGE_SIZE = 9; // 预览固定 3×3 张
+const PAGE_SIZE = 12; // 预览固定 4×3 张（上下布局全宽）
+
+// =========================================================
+// 1.5 卡图印刷版本选择（参考 mtgprint.net）
+//    每张卡在预览中显示下拉菜单，可切换不同印刷的卡图
+// =========================================================
+const allPrintingsCache = new Map();
+
+// 按 oracle_id 获取该卡的全部印刷（含 set/编号/图地址）
+// 基础地印刷极多（数百个），跟随 Scryfall 分页全部获取；其他卡只取第一页
+async function fetchAllPrintings(oracleId) {
+  if (!oracleId) return [];
+  if (allPrintingsCache.has(oracleId)) return allPrintingsCache.get(oracleId);
+
+  const mapCard = (c) => ({
+    id: c.id,
+    name: c.name,
+    set: c.set,
+    setName: c.set_name || c.set,
+    collectorNumber: c.collector_number,
+    enUrl:
+      c.image_uris?.normal || c.card_faces?.[0]?.image_uris?.normal || null,
+    oracleId: c.oracle_id,
+  });
+
+  const firstUrl = `https://api.scryfall.com/cards/search?q=oracleid:${encodeURIComponent(
+    oracleId
+  )}&unique=prints&order=released&dir=desc`;
+  const first = await fetchJson(firstUrl);
+  if (!first || !first.data) {
+    allPrintingsCache.set(oracleId, []);
+    return [];
+  }
+  let printings = first.data.filter((c) => c.collector_number).map(mapCard);
+  const isBasic = printings.some((p) => BASIC_LANDS.includes(p.name));
+
+  // 基础地：跟随分页，最多再取 4 页（总计约 875 个），拿全所有美术
+  if (isBasic && first.has_more) {
+    let next = first.next_page;
+    let pages = 1;
+    while (next && pages < 5) {
+      const d = await fetchJson(next);
+      if (!d || !d.data) break;
+      printings = printings.concat(
+        d.data.filter((c) => c.collector_number).map(mapCard)
+      );
+      next = d.has_more ? d.next_page : null;
+      pages++;
+    }
+  }
+  allPrintingsCache.set(oracleId, printings);
+  return printings;
+}
+
+// 为单张实例构建印刷选择器 <select>（所有找到的卡都显示，至少含当前版本）
+// 参考 mtgprint.net：用 <optgroup> 按系列分组，每组标注数量
+function buildPrintingSelect(inst) {
+  if (!inst.allPrintings || inst.allPrintings.length === 0) return null;
+  const sel = document.createElement("select");
+  sel.className = "printing-select";
+  sel.title = "切换卡图印刷版本（共 " + inst.allPrintings.length + " 种）";
+
+  // 按系列分组
+  const groups = new Map(); // setName -> [{p, idx}]
+  inst.allPrintings.forEach(function (p, i) {
+    const name = p.setName || p.set || "Other";
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push({ p: p, idx: i });
+  });
+
+  let html = "";
+  // 按系列内第一张卡的发行顺序排列组
+  var sortedSetNames = Array.from(groups.keys()).sort(function (a, b) {
+    var ai = groups.get(a)[0].idx;
+    var bi = groups.get(b)[0].idx;
+    return ai - bi; // 保持发行时间倒序（fetchAllPrintings 已排好）
+  });
+  sortedSetNames.forEach(function (setName) {
+    var items = groups.get(setName);
+    html +=
+      '<optgroup label="' +
+      escHtml(setName) +
+      " (" +
+      items.length +
+      ')">';
+    items.forEach(function (item) {
+      html +=
+        '<option value="' +
+        item.idx +
+        '"' +
+        (item.idx === inst.selectedPrintingIdx ? " selected" : "") +
+        ">" +
+        escHtml(item.p.collectorNumber) +
+        "</option>";
+    });
+    html += "</optgroup>";
+  });
+  sel.innerHTML = html;
+
+  sel.addEventListener("change", async function () {
+    await onPrintingChange(inst, parseInt(sel.value, 10));
+    renderPage();
+  });
+  return sel;
+}
+
+// 用户选择了新印刷 → 重新解析该卡的 faceUrl / displayUrl
+async function onPrintingChange(inst, idx) {
+  const p = inst.allPrintings[idx];
+  if (!p) return;
+  inst.selectedPrintingIdx = idx;
+  // 用新印刷的信息重新解析卡图（走中文优先逻辑）
+  const preferZh = optZh.checked;
+  const newInfo = {
+    enUrl: p.enUrl,
+    name: p.name,
+    oracleId: p.oracleId,
+    set: p.set,
+    collectorNumber: p.collectorNumber,
+  };
+  const r = await resolveFaceUrl(newInfo, preferZh);
+  inst.faceUrl = r.faceUrl;
+  inst.displayUrl = r.displayUrl;
+  inst.enUrl = p.enUrl;
+}
+
+// HTML 转义
+function escHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
 
 // =========================================================
 // 1. 解析牌表
@@ -122,6 +253,9 @@ async function lookupCard(name, set, autoFix) {
           info.card_faces?.[0]?.image_uris?.normal ||
           null,
         name: info.name,
+        oracleId: info.oracle_id || null,
+        set: info.set || null,
+        collectorNumber: info.collector_number || null,
         // 该卡在游戏中会生成的指示物（来自 all_parts 中 component === "token"）
         tokens: (info.all_parts || [])
           .filter((p) => p.component === "token")
@@ -132,14 +266,111 @@ async function lookupCard(name, set, autoFix) {
   return result;
 }
 
-async function fetchJson(url, isList) {
+// =========================================================
+// Scryfall 请求调度器（限流核心）
+// ---------------------------------------------------------
+// 问题复盘：导入瞬间几十个请求并发 → Scryfall 限流(429)，而 429 错误响应不带 CORS 头，
+// 浏览器拦截成 CORS 错误 → 印刷列表获取失败 → 卡牌没有下拉框。
+// 关键：必须保证【全局请求速率】低于 Scryfall 软上限(10/sec)，否则必被限流。
+// 做法：单一调度队列 —— 最多 N 个并发，且任意两次请求的【发起时刻】间隔 ≥ GLOBAL_GAP。
+// 重试也走同一队列（绝不绕过调度器直接 fetch），因此无论网络快慢、是否重试，
+// 总速率始终被压在限额内。
+const SRV_MAX = 3; // 最大并发
+const SRV_GLOBAL_GAP = 250; // 全局最小发起间隔(ms) → 总速率 ≈ 3/(reqTime+0.25) ≤ 限额
+let _srvBusy = 0;
+let _srvNextStart = 0;
+const _srvQueue = [];
+function _sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+function _enqueueFetch(task) {
+  return new Promise((resolve, reject) => {
+    _srvQueue.push({ task, resolve, reject });
+    _pump();
+  });
+}
+function _pump() {
+  if (_srvQueue.length === 0) return;
+  if (_srvBusy >= SRV_MAX) return;
+  const now = Date.now();
+  const target = Math.max(now, _srvNextStart);
+  const wait = target - now;
+  if (wait > 0) {
+    setTimeout(_pump, wait + 1);
+    return;
+  }
+  // 可以发起：占用并发槽，并预约下一个全局发起时刻
+  _srvBusy++;
+  _srvNextStart = target + SRV_GLOBAL_GAP;
+  const { task, resolve, reject } = _srvQueue.shift();
+  _runWorker(task)
+    .then(resolve, reject)
+    .finally(() => {
+      _srvBusy--;
+      _pump();
+    });
+}
+
+// 单次尝试（不自带重试）：返回 {kind:'done', data} 或 {kind:'retry', backoff}
+async function _tryFetchOnce(url, isList) {
   try {
     const resp = await fetch(url, { headers: { Accept: "application/json" } });
-    if (!resp.ok) return null;
-    return await resp.json();
+    if (resp.status === 429) {
+      const ra = parseInt(resp.headers.get("Retry-After") || "1", 10);
+      return { kind: "retry", backoff: (isNaN(ra) ? 1 : ra) * 1000 };
+    }
+    if (!resp.ok) return { kind: "done", data: null };
+    return { kind: "done", data: await resp.json() };
   } catch (e) {
-    return null;
+    // CORS / 网络抖动（多为 429 无 CORS 头被拦截）
+    return { kind: "retry", backoff: 400 };
   }
+}
+
+// 真正的限流锁：控制【实际 fetch 发起】的并发与间隔（与 worker 池解耦）。
+// 重试在 worker 内部进行，等待期间释放锁，避免「重试重新入队」导致死锁。
+let _rateBusy = 0;
+let _rateNext = 0;
+async function _rateAcquire() {
+  for (;;) {
+    const now = Date.now();
+    const target = Math.max(now, _rateNext);
+    if (_rateBusy < SRV_MAX && target <= now) {
+      _rateBusy++;
+      _rateNext = target + SRV_GLOBAL_GAP;
+      let released = false;
+      return () => {
+        if (!released) {
+          released = true;
+          _rateBusy--;
+          _rateNext = Math.max(_rateNext, Date.now());
+        }
+      };
+    }
+    await _sleep(Math.max(8, target - now));
+  }
+}
+
+// worker：获取限流锁 → 发起一次请求 → 若 429/CORS 则退避后重试（最多 6 次）。
+// 重试的等待在「释放锁之后」进行，因此不会占用并发槽、不会死锁。
+async function _runWorker(task) {
+  for (let attempt = 0; attempt <= 6; attempt++) {
+    const release = await _rateAcquire();
+    let r;
+    try {
+      r = await _tryFetchOnce(task.url, task.isList);
+    } finally {
+      release(); // 取完图立即释放锁，退避等待不占槽
+    }
+    if (r.kind === "done") return r.data;
+    await _sleep(r.backoff * (attempt + 1)); // 指数退避：随失败次数拉开间隔，避免重试风暴锤击 Scryfall
+  }
+  return null;
+}
+
+// 对外接口：所有 Scryfall 请求都经此调度，避免突发被限流
+function fetchJson(url, isList) {
+  return _enqueueFetch({ url, isList });
 }
 
 // 按 Scryfall id 取指示物卡数据（带缓存）
@@ -162,56 +393,63 @@ async function fetchTokenInfo(id) {
 }
 
 // =========================================================
-// 3. 拼中文卡图 URL（大学院废墟）
+// 3. 拼中文卡图 URL（大学院废墟 / mtgch）
 // =========================================================
-function mtgchUrl(id) {
-  return `https://images.mtgch.com/zhs/large/front/${id[0]}/${id[1]}/${id}.webp`;
+// 关键修正：mtgch 的中文图用的是它【自己的 uuid】，≠ Scryfall 的卡 id。
+// 之前用 Scryfall id 拼 URL 只能“撞巧”命中（如 2X2 Bolt 两者 id 恰好相同），
+// 对大多数卡（如 GRN Healer's Hawk）会 404。正确做法是用 mtgch 官方 API：
+//   GET https://mtgch.com/api/v1/card/{set}/{collector_number}/
+// 从返回的 zhs_image_uris.large 取真实中文图地址。
+// CORS：mtgch 反射任意 Origin（含本地 file:// 的 null），浏览器/本地均可跨域 fetch。
+// 若某印刷没有中文（zhs_image_uris 缺失），API 返回里就没有该字段 → 直接回退英文。
+const mtgchApiCache = new Map();
+async function fetchMtgchZh(set, collectorNumber) {
+  if (!set || !collectorNumber) return null;
+  const key = set + "/" + collectorNumber;
+  if (mtgchApiCache.has(key)) return mtgchApiCache.get(key);
+  let url = null;
+  try {
+    const r = await fetch(
+      `https://mtgch.com/api/v1/card/${encodeURIComponent(
+        set
+      )}/${encodeURIComponent(collectorNumber)}/`
+    );
+    if (r.ok) {
+      const d = await r.json();
+      const z = d.zhs_image_uris;
+      if (z && z.large) url = z.large.split("?")[0]; // 去 ?ts= 缓存戳，TTS 加载更稳
+    }
+  } catch (e) {
+    /* 跨域/网络失败 → 上层回退英文 */
+  }
+  mtgchApiCache.set(key, url);
+  return url;
 }
 
-// 经参考站代理转发 Scryfall 图：TTS 直连 cards.scryfall.io 会被拦，
+// 经参考站代理转发 Scryfall 英文图：TTS 直连 cards.scryfall.io 会被拦，
 // 但 tts-magic-booster.fly.dev/i/ 可正常加载。
-// 注：卡背 backs.scryfall.io 在 TTS 可直连，故不代理。
+// 注：卡背 backs.scryfall.io 在 TTS 可直连，故不代理；mtgch 中文图在 TTS 也可直连，不代理。
 function proxify(url) {
   if (!url) return url;
   return "https://tts-magic-booster.fly.dev/i/" + url.replace(/^https?:\/\//, "");
 }
 
-// 校验图片是否可达（浏览器内不受 CORS 限制，onerror 可捕获）
-function verifyImage(url, timeout = 4000) {
-  return new Promise((resolve) => {
-    if (!url) return resolve(false);
-    const img = new Image();
-    let done = false;
-    const finish = (ok) => {
-      if (!done) {
-        done = true;
-        resolve(ok);
-      }
-    };
-    img.onload = () => finish(true);
-    img.onerror = () => finish(false);
-    // 超时也算失败，回退英文
-    setTimeout(() => finish(false), timeout);
-    img.src = url;
-  });
-}
-
 // 决定卡图地址，返回两个：
-//  - faceUrl   → 写入 TTS JSON 用（基础地/英文图经代理，确保 TTS 可加载）
-//  - displayUrl→ 浏览器直连展示用（预览/弹窗/打印，不经代理，避免代理在浏览器里不稳定）
+//  - faceUrl   → 写入 TTS JSON（mtgch 中文图可直连，故不代理；英文图才走代理）
+//  - displayUrl→ 浏览器直连展示用（预览/弹窗/打印）
 // 规则：
 //  - 基础地 / 不想要中文 → 英文 Scryfall 图（导出代理、展示直连）
-//  - 否则尝试 mtgch 中文图（本身可直连，导出/展示同一地址），失败再回退英文
+//  - 否则尝试 mtgch 中文图（仅当前系列）；若无中文图则回退英文
 async function resolveFaceUrl(info, preferZh) {
   if (!info) return { faceUrl: null, displayUrl: null };
   if (BASIC_LANDS.includes(info.name) || !preferZh) {
     return { faceUrl: proxify(info.enUrl), displayUrl: info.enUrl };
   }
-  const zh = mtgchUrl(info.id);
-  const ok = await verifyImage(zh);
-  return ok
-    ? { faceUrl: zh, displayUrl: zh }
-    : { faceUrl: proxify(info.enUrl), displayUrl: info.enUrl };
+  // 当前系列中文图（用 set + collector_number 查 mtgch API 拿真实地址）
+  const curZh = await fetchMtgchZh(info.set, info.collectorNumber);
+  if (curZh) return { faceUrl: curZh, displayUrl: curZh };
+  // 当前系列无中文图 → 回退英文
+  return { faceUrl: proxify(info.enUrl), displayUrl: info.enUrl };
 }
 
 // =========================================================
@@ -270,7 +508,7 @@ async function importDeck() {
     infoMap.set(c.set ? `${c.name}|${c.set}` : c.name, lookups[i]);
   });
 
-  // 解析每张实例的最终图（限流 + 可达性校验）
+  // 解析每张实例的最终图（限流 + 中文图解析）
   const preferZh = optZh.checked;
   await mapLimit(instances, 5, async (inst) => {
     const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
@@ -326,6 +564,31 @@ async function importDeck() {
   statTypes.textContent = typeCount;
   statTokens.textContent = tokens.length;
 
+  // 批量获取每张卡的印刷版本列表（用于预览区下拉选择）
+  setStatus("正在获取印刷版本列表…", "");
+  const oracleIdSet = new Set();
+  for (const inst of instances) {
+    const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
+    const info = infoMap.get(key);
+    if (info?.oracleId) oracleIdSet.add(info.oracleId);
+  }
+  const printingsMap = new Map();
+  await mapLimit([...oracleIdSet], 3, async (oid) => {
+    printingsMap.set(oid, await fetchAllPrintings(oid));
+  });
+  // 将印刷列表挂到每个实例上
+  for (const inst of instances) {
+    const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
+    const info = infoMap.get(key);
+    const prints = info?.oracleId ? printingsMap.get(info.oracleId) || [] : [];
+    inst.allPrintings = prints;
+    // 定位当前印刷在列表中的索引
+    const curIdx = prints.findIndex(
+      (p) => p.set === info?.set && p.collectorNumber === info?.collectorNumber
+    );
+    inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
+  }
+
   // 初始化分页并渲染第一页（主牌在前，指示物在后）
   previewInstances = [...instances, ...tokens];
   currentPage = 0;
@@ -357,6 +620,10 @@ function renderPage() {
 
   cardGrid.innerHTML = "";
   for (const inst of pageItems) {
+    // 外层包裹：卡格 + 下拉选择器
+    const wrap = document.createElement("div");
+    wrap.className = "printing-wrap";
+
     const cell = document.createElement("div");
     cell.className = "card-cell loading";
     const img = document.createElement("img");
@@ -365,7 +632,6 @@ function renderPage() {
     img.onload = () => cell.classList.remove("loading");
     img.onerror = () => {
       cell.classList.remove("loading");
-      // 直连图失败时回退英文原图
       if (inst.enUrl && img.src !== inst.enUrl) img.src = inst.enUrl;
     };
     img.src = inst.displayUrl || inst.faceUrl || inst.enUrl || "";
@@ -388,7 +654,13 @@ function renderPage() {
       cell.appendChild(badge);
     }
 
-    cardGrid.appendChild(cell);
+    wrap.appendChild(cell);
+
+    // 印刷版本选择下拉（放在卡格下方）
+    const sel = buildPrintingSelect(inst);
+    if (sel) wrap.appendChild(sel);
+
+    cardGrid.appendChild(wrap);
   }
 
   // 更新计数与翻页控件

@@ -234,14 +234,23 @@ async function lookupCard(name, set, autoFix) {
   let url = `https://api.scryfall.com/cards/named?exact=${q}`;
   if (set) url += `&set=${encodeURIComponent(set)}`;
 
-  let info = await fetchJson(url);
+  let info = null;
+  try {
+    info = await fetchJson(url);
+  } catch (e) {
+    console.warn("Scryfall 查卡失败：", name, e);
+  }
   if (!info && autoFix) {
     // 自动修复：退化为模糊搜索
-    const sq = encodeURIComponent(`!"${name}"${set ? " set:" + set : ""}`);
-    const sUrl = `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`;
-    const sData = await fetchJson(sUrl, true);
-    if (sData && sData.data && sData.data.length) {
-      info = sData.data[0];
+    try {
+      const sq = encodeURIComponent(`!"${name}"${set ? " set:" + set : ""}`);
+      const sUrl = `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`;
+      const sData = await fetchJson(sUrl, true);
+      if (sData && sData.data && sData.data.length) {
+        info = sData.data[0];
+      }
+    } catch (e) {
+      console.warn("Scryfall 模糊搜索失败：", name, e);
     }
   }
 
@@ -267,117 +276,106 @@ async function lookupCard(name, set, autoFix) {
 }
 
 // =========================================================
-// Scryfall 请求调度器（限流核心）
+// =========================================================
+// Scryfall 请求客户端（限流 + 自动重试，单一实现）
 // ---------------------------------------------------------
-// 问题复盘：导入瞬间几十个请求并发 → Scryfall 限流(429)，而 429 错误响应不带 CORS 头，
-// 浏览器拦截成 CORS 错误 → 印刷列表获取失败 → 卡牌没有下拉框。
-// 关键：必须保证【全局请求速率】低于 Scryfall 软上限(10/sec)，否则必被限流。
-// 做法：单一调度队列 —— 最多 N 个并发，且任意两次请求的【发起时刻】间隔 ≥ GLOBAL_GAP。
-// 重试也走同一队列（绝不绕过调度器直接 fetch），因此无论网络快慢、是否重试，
-// 总速率始终被压在限额内。
-const SRV_MAX = 3; // 最大并发
-const SRV_GLOBAL_GAP = 250; // 全局最小发起间隔(ms) → 总速率 ≈ 3/(reqTime+0.25) ≤ 限额
-let _srvBusy = 0;
-let _srvNextStart = 0;
-const _srvQueue = [];
-function _sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-function _enqueueFetch(task) {
-  return new Promise((resolve, reject) => {
-    _srvQueue.push({ task, resolve, reject });
-    _pump();
-  });
-}
-function _pump() {
-  if (_srvQueue.length === 0) return;
-  if (_srvBusy >= SRV_MAX) return;
-  const now = Date.now();
-  const target = Math.max(now, _srvNextStart);
-  const wait = target - now;
-  if (wait > 0) {
-    setTimeout(_pump, wait + 1);
-    return;
-  }
-  // 可以发起：占用并发槽，并预约下一个全局发起时刻
-  _srvBusy++;
-  _srvNextStart = target + SRV_GLOBAL_GAP;
-  const { task, resolve, reject } = _srvQueue.shift();
-  _runWorker(task)
-    .then(resolve, reject)
-    .finally(() => {
-      _srvBusy--;
-      _pump();
-    });
-}
+// 设计要点：
+//  - 所有 Scryfall 请求统一走这里，杜绝「绕过调度器直接 fetch」导致的突发限流。
+//  - 单一限流锁：并发数 ≤ MAX_CONCURRENT，且任意两次请求【发起时刻】间隔 ≥ MIN_INTERVAL_MS，
+//    总速率被压在 Scryfall 软上限(10/sec) 以内，避免 429。
+//  - 429 / 网络错误（多为 429 无 CORS 头被浏览器拦截成 CORS 错误）自动指数退避重试；
+//    HTTP 404 等确定性无数据返回 null（不重试）。
+//  - 持续失败（超过重试上限）抛错，由调用方决定降级策略；【失败不缓存】，
+//    因此重新导入仍可重试，不会出现「某张卡永久没有下拉框」。
+// =========================================================
+const ScryfallClient = (() => {
+  const MAX_CONCURRENT = 3; // 最大并发请求数
+  const MIN_INTERVAL_MS = 250; // 任意两次请求发起时刻的最小间隔
+  const MAX_RETRIES = 4; // 429 / 网络错误的重试次数
 
-// 单次尝试（不自带重试）：返回 {kind:'done', data} 或 {kind:'retry', backoff}
-async function _tryFetchOnce(url, isList) {
-  try {
-    const resp = await fetch(url, { headers: { Accept: "application/json" } });
-    if (resp.status === 429) {
-      const ra = parseInt(resp.headers.get("Retry-After") || "1", 10);
-      return { kind: "retry", backoff: (isNaN(ra) ? 1 : ra) * 1000 };
+  let active = 0; // 当前在途请求数
+  let nextStart = 0; // 下一个允许发起请求的时刻
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 在限流锁保护下获取一个「发起名额」：保证并发与间隔约束；返回释放函数
+  async function acquire() {
+    for (;;) {
+      const now = Date.now();
+      const target = Math.max(now, nextStart);
+      if (active < MAX_CONCURRENT && target <= now) {
+        active++;
+        nextStart = target + MIN_INTERVAL_MS;
+        let released = false;
+        return () => {
+          if (!released) {
+            released = true;
+            active--;
+          }
+        };
+      }
+      await sleep(Math.max(5, target - now));
     }
-    if (!resp.ok) return { kind: "done", data: null };
-    return { kind: "done", data: await resp.json() };
-  } catch (e) {
-    // CORS / 网络抖动（多为 429 无 CORS 头被拦截）
-    return { kind: "retry", backoff: 400 };
   }
-}
 
-// 真正的限流锁：控制【实际 fetch 发起】的并发与间隔（与 worker 池解耦）。
-// 重试在 worker 内部进行，等待期间释放锁，避免「重试重新入队」导致死锁。
-let _rateBusy = 0;
-let _rateNext = 0;
-async function _rateAcquire() {
-  for (;;) {
-    const now = Date.now();
-    const target = Math.max(now, _rateNext);
-    if (_rateBusy < SRV_MAX && target <= now) {
-      _rateBusy++;
-      _rateNext = target + SRV_GLOBAL_GAP;
-      let released = false;
-      return () => {
-        if (!released) {
-          released = true;
-          _rateBusy--;
-          _rateNext = Math.max(_rateNext, Date.now());
-        }
-      };
-    }
-    await _sleep(Math.max(8, target - now));
-  }
-}
-
-// worker：获取限流锁 → 发起一次请求 → 若 429/CORS 则退避后重试（最多 6 次）。
-// 重试的等待在「释放锁之后」进行，因此不会占用并发槽、不会死锁。
-async function _runWorker(task) {
-  for (let attempt = 0; attempt <= 6; attempt++) {
-    const release = await _rateAcquire();
-    let r;
+  // 单次 HTTP 尝试：成功返回 JSON；确定性无数据(404 等)返回 null；需重试的情况抛错
+  async function requestOnce(url, isList) {
     try {
-      r = await _tryFetchOnce(task.url, task.isList);
-    } finally {
-      release(); // 取完图立即释放锁，退避等待不占槽
+      const resp = await fetch(url, { headers: { Accept: "application/json" } });
+      if (resp.status === 429) {
+        const ra = parseInt(resp.headers.get("Retry-After") || "1", 10);
+        const err = new Error("rate-limited");
+        err.retryAfter = (isNaN(ra) ? 1 : ra) * 1000;
+        throw err;
+      }
+      if (!resp.ok) return null; // 确定性失败（如 404）→ 无数据，不重试
+      return await resp.json();
+    } catch (e) {
+      // 网络 / CORS 抖动（429 无 CORS 头被拦截）→ 抛错以触发重试
+      const err = new Error("network");
+      err.retryAfter = 400;
+      throw err;
     }
-    if (r.kind === "done") return r.data;
-    await _sleep(r.backoff * (attempt + 1)); // 指数退避：随失败次数拉开间隔，避免重试风暴锤击 Scryfall
   }
-  return null;
-}
 
-// 对外接口：所有 Scryfall 请求都经此调度，避免突发被限流
+  // 对外：带限流 + 指数退避重试的 GET。
+  //   成功 → 返回 JSON（可能为 null 表示无数据）
+  //   持续失败 → 抛错（由调用方降级）
+  async function get(url, isList = false) {
+    let lastErr;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const release = await acquire();
+      try {
+        return await requestOnce(url, isList);
+      } catch (e) {
+        lastErr = e;
+        const base = e.retryAfter || 400;
+        await sleep(base * Math.pow(2, attempt)); // 指数退避：避免重试风暴
+      } finally {
+        release();
+      }
+    }
+    throw lastErr || new Error("Scryfall 请求失败");
+  }
+
+  return { get };
+})();
+
+// 所有 Scryfall 请求的统一入口（失败时抛错，调用方自行 try/catch 降级）
 function fetchJson(url, isList) {
-  return _enqueueFetch({ url, isList });
+  return ScryfallClient.get(url, isList);
 }
 
 // 按 Scryfall id 取指示物卡数据（带缓存）
 const tokenCache = new Map();
 async function fetchTokenInfo(id) {
   if (tokenCache.has(id)) return tokenCache.get(id);
-  const info = await fetchJson(`https://api.scryfall.com/cards/${id}`);
+  let info = null;
+  try {
+    info = await fetchJson(`https://api.scryfall.com/cards/${id}`);
+  } catch (e) {
+    console.warn("Scryfall 指示物查询失败：", id, e);
+  }
   const result = info
     ? {
         id: info.id,
@@ -487,12 +485,12 @@ async function importDeck() {
   importBtn.disabled = true;
   setStatus("正在查询卡牌信息…", "");
 
-  // 展开为实例（不再区分主牌/备牌，整副牌作为一个卡组）
+  // 展开为实例（整副牌作为一个卡组，不再区分主牌/备牌）
   const instances = [];
   for (const c of cards)
     for (let k = 0; k < c.qty; k++) instances.push({ ...c });
 
-  // 去重查询
+  // 去重查询：相同「卡名|系列」只在 Scryfall 查一次，避免重复请求
   const uniqueMap = new Map();
   for (const inst of instances) {
     const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
@@ -504,11 +502,11 @@ async function importDeck() {
     uniqueCards.map((c) => lookupCard(c.name, c.set, autoFix))
   );
   const infoMap = new Map();
-  uniqueCards.forEach((c, i) => {
-    infoMap.set(c.set ? `${c.name}|${c.set}` : c.name, lookups[i]);
+  uniqueCards.forEach((c, idx) => {
+    infoMap.set(c.set ? `${c.name}|${c.set}` : c.name, lookups[idx]);
   });
 
-  // 解析每张实例的最终图（限流 + 中文图解析）
+  // 解析每张实例的最终图（限流 + 中文图解析），并把关键信息挂到实例上
   const preferZh = optZh.checked;
   await mapLimit(instances, 5, async (inst) => {
     const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
@@ -518,11 +516,16 @@ async function importDeck() {
     inst.displayUrl = r.displayUrl;
     inst.enUrl = info?.enUrl || null;
     inst.found = !!info;
+    inst.oracleId = info?.oracleId || null;
+    inst.set = info?.set || inst.set; // 用查到的实际系列/编号作为「当前印刷」
+    inst.collectorNumber = info?.collectorNumber || null;
+    inst.allPrintings = []; // 印刷列表稍后异步加载
+    inst.selectedPrintingIdx = 0;
   });
 
   const totalCount = instances.length;
   const typeCount = uniqueCards.length;
-  const missing = instances.filter((i) => !i.found).length;
+  const missing = instances.filter((it) => !it.found).length;
 
   // 自动收集指示物：汇总所有主牌 all_parts 里的 token（按 id 去重）
   const tokens = [];
@@ -564,48 +567,84 @@ async function importDeck() {
   statTypes.textContent = typeCount;
   statTokens.textContent = tokens.length;
 
-  // 批量获取每张卡的印刷版本列表（用于预览区下拉选择）
-  setStatus("正在获取印刷版本列表…", "");
-  const oracleIdSet = new Set();
-  for (const inst of instances) {
-    const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
-    const info = infoMap.get(key);
-    if (info?.oracleId) oracleIdSet.add(info.oracleId);
-  }
-  const printingsMap = new Map();
-  await mapLimit([...oracleIdSet], 3, async (oid) => {
-    printingsMap.set(oid, await fetchAllPrintings(oid));
-  });
-  // 将印刷列表挂到每个实例上
-  for (const inst of instances) {
-    const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
-    const info = infoMap.get(key);
-    const prints = info?.oracleId ? printingsMap.get(info.oracleId) || [] : [];
-    inst.allPrintings = prints;
-    // 定位当前印刷在列表中的索引
-    const curIdx = prints.findIndex(
-      (p) => p.set === info?.set && p.collectorNumber === info?.collectorNumber
-    );
-    inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
-  }
-
-  // 初始化分页并渲染第一页（主牌在前，指示物在后）
+  // 先渲染预览（卡图立即可见），印刷版本下拉框在后台异步加载
   previewInstances = [...instances, ...tokens];
   currentPage = 0;
   renderPage();
   exportBtn.disabled = false;
   printBtn.disabled = false;
 
+  // 同一张卡（同 oracle_id）只查一次印刷版本，结果共享给所有同名实例
+  const oracleIdList = [...new Set(instances.map((it) => it.oracleId).filter(Boolean))];
+  const gen = ++currentLoadGen; // 标记本次导入，避免旧的后台任务污染新牌表
+  loadPrintings(oracleIdList, instances, gen).catch((e) =>
+    console.warn("印刷版本加载异常：", e)
+  );
+
   let msg = `导入成功：${totalCount} 张卡（${typeCount} 种）`;
   if (tokens.length) msg += ` · ${tokens.length} 个指示物`;
   if (missing > 0) msg += `；${missing} 张卡未找到，已用占位。`;
   else if (warned) msg += "；部分无法识别的行已跳过。";
   if (tokenMissing > 0) msg += `；${tokenMissing} 个指示物获取失败已跳过。`;
-  setStatus(msg, missing > 0 || tokenMissing > 0 ? "error" : "ok");
+  lastImportMsg = msg;
   importBtn.disabled = false;
+  // 卡图已就绪，印刷版本在后台继续加载
+  setStatus(msg + " · 正在加载印刷版本…", missing > 0 || tokenMissing > 0 ? "error" : "");
 }
 
-// =========================================================
+// 后台加载状态（用于写入最终状态，并取消过期的后台加载任务）
+let currentLoadGen = 0;
+let lastImportMsg = "";
+
+// 后台异步加载每张卡的印刷版本下拉数据；不阻塞导入，失败可重试且不污染新牌表
+async function loadPrintings(oracleIdList, cardInstances, gen) {
+  if (!oracleIdList.length) {
+    setStatus(lastImportMsg + " · 印刷版本无需加载", "ok");
+    return;
+  }
+  const total = oracleIdList.length;
+  let failed = 0;
+  await mapLimit(oracleIdList, 4, async (oid) => {
+    if (gen !== currentLoadGen) return; // 已被新的导入取代，放弃本批
+    let prints = [];
+    try {
+      prints = await fetchAllPrintings(oid);
+    } catch (e) {
+      failed++;
+      console.warn("印刷版本获取失败（已降级为空）：", oid, e);
+      prints = []; // 本次降级；未缓存，下次/重导可重试
+    }
+    // 写入所有该 oracleId 的卡牌实例
+    for (const inst of cardInstances) {
+      if (inst.oracleId === oid) {
+        inst.allPrintings = prints;
+        const curIdx = prints.findIndex(
+          (p) => p.set === inst.set && p.collectorNumber === inst.collectorNumber
+        );
+        inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
+      }
+    }
+    if (gen === currentLoadGen) patchVisiblePrintingSelects(oid);
+  });
+  if (gen !== currentLoadGen) return; // 被新导入取代
+  const ok = total - failed;
+  setStatus(
+    lastImportMsg + ` · 印刷版本已加载（${ok}/${total} 种可切换）`,
+    failed > 0 ? "error" : "ok"
+  );
+}
+
+// 为当前页中匹配该 oracleId、且尚未添加下拉框的卡格补上下拉
+function patchVisiblePrintingSelects(oid) {
+  for (const wrap of cardGrid.children) {
+    const inst = wrap._inst;
+    if (!inst || inst.oracleId !== oid) continue;
+    if (wrap.querySelector(".printing-select")) continue;
+    const sel = buildPrintingSelect(inst);
+    if (sel) wrap.appendChild(sel);
+  }
+}
+
 // 6. 预览渲染
 // =========================================================
 function renderPage() {
@@ -655,8 +694,9 @@ function renderPage() {
     }
 
     wrap.appendChild(cell);
+    wrap._inst = inst; // 供后台异步加载印刷版本时补上下拉框
 
-    // 印刷版本选择下拉（放在卡格下方）
+    // 印刷版本选择下拉（若已加载则立即显示）
     const sel = buildPrintingSelect(inst);
     if (sel) wrap.appendChild(sel);
 
@@ -1083,6 +1123,7 @@ clearBtn.addEventListener("click", () => {
   exportBtn.disabled = true;
   printBtn.disabled = true;
   deckData = null;
+  currentLoadGen++; // 取消可能仍在后台运行的印刷版本加载
   setStatus("", "");
 });
 

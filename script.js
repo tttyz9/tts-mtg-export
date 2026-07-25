@@ -279,32 +279,36 @@
       } catch (e) {
         console.warn("Scryfall 查卡失败：", name, e);
       }
-      if (!info && autoFix) {
-        // 自动修复：先按「卡名 + 指定系列」模糊搜；若该系列确实没有这张卡
-        // （牌表里系列代号写错是常事），再退化为「只按卡名」搜，避免整张卡消失。
-        if (set) {
-          try {
-            const sq = encodeURIComponent(`!"${name}" set:${set}`);
-            const sData = await fetchJson(
-              `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
-              true
-            );
-            if (sData && sData.data && sData.data.length) info = sData.data[0];
-          } catch (e) {
-            console.warn("Scryfall 模糊搜索(带系列)失败：", name, e);
-          }
+
+      // 主查失败兜底（关键）：Scryfall 的 cards/named?set= 只接受「系列代号」(fdn)，
+      // 不接受「系列全名」(Foundations)——后者直接 404。很多牌表导出写的是全名，
+      // 因此这里无条件改用搜索接口（cards/search 的 set: 既能接代号也能接全名）再试一次。
+      // 这一步是「修正查询格式」，不应受 autoFix 开关影响，否则全名牌表会整张消失。
+      if (!info && set) {
+        try {
+          const sq = encodeURIComponent(`!"${name}" set:${set}`);
+          const sData = await fetchJson(
+            `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
+            true
+          );
+          if (sData && sData.data && sData.data.length) info = sData.data[0];
+        } catch (e) {
+          console.warn("Scryfall 搜索(带系列)失败：", name, e);
         }
-        if (!info) {
-          try {
-            const sq = encodeURIComponent(`!"${name}"`);
-            const sData = await fetchJson(
-              `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
-              true
-            );
-            if (sData && sData.data && sData.data.length) info = sData.data[0];
-          } catch (e) {
-            console.warn("Scryfall 模糊搜索(仅卡名)失败：", name, e);
-          }
+      }
+
+      // 自动修复（受 autoFix 开关控制）：系列代号确实写错（该系列无此卡）时，
+      // 退化为「只按卡名」搜，避免整张卡消失。
+      if (!info && autoFix) {
+        try {
+          const sq = encodeURIComponent(`!"${name}"`);
+          const sData = await fetchJson(
+            `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
+            true
+          );
+          if (sData && sData.data && sData.data.length) info = sData.data[0];
+        } catch (e) {
+          console.warn("Scryfall 模糊搜索(仅卡名)失败：", name, e);
         }
       }
 

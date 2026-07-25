@@ -72,6 +72,7 @@
       optFix: $("optFix"),
       optZh: $("optZh"),
       optToken: $("optToken"),
+      optBackFace: $("optBackFace"),
       statTokens: $("statTokens"),
       tabUrl: $("tabUrl"),
     };
@@ -279,16 +280,31 @@
         console.warn("Scryfall 查卡失败：", name, e);
       }
       if (!info && autoFix) {
-        // 自动修复：退化为模糊搜索
-        try {
-          const sq = encodeURIComponent(`!"${name}"${set ? " set:" + set : ""}`);
-          const sUrl = `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`;
-          const sData = await fetchJson(sUrl, true);
-          if (sData && sData.data && sData.data.length) {
-            info = sData.data[0];
+        // 自动修复：先按「卡名 + 指定系列」模糊搜；若该系列确实没有这张卡
+        // （牌表里系列代号写错是常事），再退化为「只按卡名」搜，避免整张卡消失。
+        if (set) {
+          try {
+            const sq = encodeURIComponent(`!"${name}" set:${set}`);
+            const sData = await fetchJson(
+              `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
+              true
+            );
+            if (sData && sData.data && sData.data.length) info = sData.data[0];
+          } catch (e) {
+            console.warn("Scryfall 模糊搜索(带系列)失败：", name, e);
           }
-        } catch (e) {
-          console.warn("Scryfall 模糊搜索失败：", name, e);
+        }
+        if (!info) {
+          try {
+            const sq = encodeURIComponent(`!"${name}"`);
+            const sData = await fetchJson(
+              `https://api.scryfall.com/cards/search?q=${sq}&unique=cards`,
+              true
+            );
+            if (sData && sData.data && sData.data.length) info = sData.data[0];
+          } catch (e) {
+            console.warn("Scryfall 模糊搜索(仅卡名)失败：", name, e);
+          }
         }
       }
 
@@ -304,6 +320,8 @@
             set: info.set || null,
             setName: info.set_name || null,
             collectorNumber: info.collector_number || null,
+            // 双面牌需要：透传 card_faces，供 importDeck 抽取背面陪伴卡
+            cardFaces: info.card_faces || null,
             // 该卡在游戏中会生成的指示物（来自 all_parts 中 component === "token"）
             tokens: (info.all_parts || [])
               .filter((p) => p.component === "token")
@@ -365,51 +383,106 @@
       return url;
     }
 
-    // 决定卡图地址，返回两个：
-    //  - faceUrl   → 写入 TTS JSON（mtgch 中文图可直连，故不代理；英文图才走代理）
-    //  - displayUrl→ 浏览器直连展示用（预览/弹窗/打印）
+    // 双面牌背面中文图地址：与正面共用同一 UUID，仅把路径 /front/ 换成 /back/，
+    // 且仅 large 尺寸可用（small/normal 对背面均 404）。mtgch 的 API 字段
+    // zhs_image_uris 只含正面，但 /back/ 路径真实存在（已用多张 DFC 验证）。
+    function deriveZhBackUrl(zhFrontUrl) {
+      if (!zhFrontUrl) return null;
+      return zhFrontUrl.replace("/zhs/large/front/", "/zhs/large/back/");
+    }
+
+    // 决定卡图地址，返回：
+    //  - faceUrl / displayUrl        → 正面图（写入 TTS / 浏览器展示）
+    //  - backFaceUrl / backDisplayUrl→ 双面牌背面图（无背面时为 null）
     // 规则：
     //  - 基础地 / 不想要中文 → 英文 Scryfall 图（导出代理、展示直连）
-    //  - 否则尝试 mtgch 中文图（仅当前系列）；若无中文图则回退英文
+    //  - 否则尝试 mtgch 中文图（仅当前系列）；背面同样取中文（/front/→/back/）
+    //  - 当前系列无中文图 → 正反面都回退英文
     async function resolveFaceUrl(info, preferZh) {
       if (!info) return { faceUrl: null, displayUrl: null };
+      const isDfc = !!(info.cardFaces && info.cardFaces.length >= 2);
+      const bfEnUrl =
+        isDfc && info.cardFaces[1].image_uris
+          ? info.cardFaces[1].image_uris.normal || null
+          : null;
+
       if (BASIC_LANDS.includes(info.name) || !preferZh) {
-        return { faceUrl: proxify(info.enUrl), displayUrl: info.enUrl };
+        return {
+          faceUrl: proxify(info.enUrl),
+          displayUrl: info.enUrl,
+          backFaceUrl: bfEnUrl ? proxify(bfEnUrl) : null,
+          backDisplayUrl: bfEnUrl,
+        };
       }
       // 当前系列中文图（用 set + collector_number 查 mtgch API 拿真实地址）
       const curZh = await fetchMtgchZh(info.set, info.collectorNumber);
-      if (curZh) return { faceUrl: curZh, displayUrl: curZh };
-      // 当前系列无中文图 → 回退英文
-      return { faceUrl: proxify(info.enUrl), displayUrl: info.enUrl };
+      if (curZh) {
+        // 中文背面图与正面共用 UUID，仅路径 /front/ → /back/
+        const backZh = deriveZhBackUrl(curZh);
+        return {
+          faceUrl: curZh,
+          displayUrl: curZh,
+          backFaceUrl: backZh,
+          backDisplayUrl: backZh,
+        };
+      }
+      // 当前系列无中文图 → 正反面都回退英文
+      return {
+        faceUrl: proxify(info.enUrl),
+        displayUrl: info.enUrl,
+        backFaceUrl: bfEnUrl ? proxify(bfEnUrl) : null,
+        backDisplayUrl: bfEnUrl,
+      };
     }
 
-    // 按 oracle_id 获取该卡的全部印刷（含 set/编号/图地址）
+    // 获取某卡的全部印刷（含 set/编号/图地址）。
+    // query：{ oracleId } 正面（默认）/ { name } 双面牌背面（Scryfall 的 cards/named
+    //        不在 card_faces 内返回背面 oracle_id，故背面改用「卡名精确搜索」拿列表）
+    // faceIndex：0=取正面图（默认），1=取双面牌背面图（用于背面陪伴卡的下拉）
     // 基础地印刷极多（数百个），跟随 Scryfall 分页全部获取；其他卡只取第一页
-    async function fetchAllPrintings(oracleId) {
-      if (!oracleId) return [];
-      if (allPrintingsCache.has(oracleId)) return allPrintingsCache.get(oracleId);
+    async function fetchAllPrintings(query, faceIndex = 0) {
+      if (!query) return [];
+      const cacheKey =
+        (query.oracleId ? "o:" + query.oracleId : "n:" + query.name) + "|" + faceIndex;
+      if (allPrintingsCache.has(cacheKey)) return allPrintingsCache.get(cacheKey);
 
-      const mapCard = (c) => ({
-        id: c.id,
-        name: c.name,
-        set: c.set,
-        setName: c.set_name || c.set,
-        collectorNumber: c.collector_number,
-        enUrl:
-          c.image_uris?.normal || c.card_faces?.[0]?.image_uris?.normal || null,
-        oracleId: c.oracle_id,
-      });
+      const mapCard = (c) => {
+        // faceIndex=0 取正面图；faceIndex=1 取双面牌背面图（背面陪伴卡回退用）
+        const faceImg = c.card_faces && c.card_faces[faceIndex];
+        const faceName = (faceImg && faceImg.name) || c.name;
+        return {
+          id: c.id,
+          name: faceName,
+          cardName: c.name, // 真实卡名（基础地判定用；双面牌此处为正面名）
+          set: c.set,
+          setName: c.set_name || c.set,
+          collectorNumber: c.collector_number,
+          enUrl:
+            (faceIndex === 0
+              ? c.image_uris?.normal || c.card_faces?.[0]?.image_uris?.normal
+              : faceImg?.image_uris?.normal) || null,
+          oracleId: c.oracle_id,
+        };
+      };
 
-      const firstUrl = `https://api.scryfall.com/cards/search?q=oracleid:${encodeURIComponent(
-        oracleId
-      )}&unique=prints&order=released&dir=desc`;
+      let firstUrl;
+      if (query.oracleId) {
+        firstUrl = `https://api.scryfall.com/cards/search?q=oracleid:${encodeURIComponent(
+          query.oracleId
+        )}&unique=prints&order=released&dir=desc`;
+      } else {
+        // 双面牌背面：按背面卡名精确搜索（如 "Photon, Living Light"）
+        firstUrl = `https://api.scryfall.com/cards/search?q=${encodeURIComponent(
+          '!"' + query.name + '"'
+        )}&unique=prints&order=released&dir=desc`;
+      }
       const first = await fetchJson(firstUrl);
       if (!first || !first.data) {
-        allPrintingsCache.set(oracleId, []);
+        allPrintingsCache.set(cacheKey, []);
         return [];
       }
       let printings = first.data.filter((c) => c.collector_number).map(mapCard);
-      const isBasic = printings.some((p) => BASIC_LANDS.includes(p.name));
+      const isBasic = printings.some((p) => BASIC_LANDS.includes(p.cardName));
 
       // 基础地：跟随分页，最多再取 4 页（总计约 875 个），拿全所有美术
       if (isBasic && first.has_more) {
@@ -425,11 +498,29 @@
           pages++;
         }
       }
-      allPrintingsCache.set(oracleId, printings);
+      allPrintingsCache.set(cacheKey, printings);
       return printings;
     }
 
-    return { lookupCard, fetchTokenInfo, resolveFaceUrl, fetchAllPrintings };
+    // 决定【双面牌背面】的卡图地址（独立于正面，供背面陪伴卡切换印刷版本用）。
+    // 输入 printing 对象（含 set/collectorNumber/enUrl 等背面图信息），返回：
+    //  - faceUrl / displayUrl → 该印刷版本的背面图（中文优先，无中文回退英文）
+    // 中文背面图：用同系列同编号查 mtgch 拿正面中文图，再 /front/→/back/ 推导。
+    async function resolveBackFaceUrl(p, preferZh) {
+      if (!p) return { faceUrl: null, displayUrl: null };
+      const bfEnUrl = p.enUrl;
+      if (!preferZh) {
+        return { faceUrl: proxify(bfEnUrl), displayUrl: bfEnUrl };
+      }
+      const curZh = await fetchMtgchZh(p.set, p.collectorNumber);
+      if (curZh) {
+        const backZh = deriveZhBackUrl(curZh);
+        return { faceUrl: backZh, displayUrl: backZh };
+      }
+      return { faceUrl: proxify(bfEnUrl), displayUrl: bfEnUrl };
+    }
+
+    return { lookupCard, fetchTokenInfo, resolveFaceUrl, resolveBackFaceUrl, fetchAllPrintings };
   })();
 
   // =========================================================
@@ -483,7 +574,9 @@
       sel.innerHTML = html;
 
       sel.addEventListener("change", async function () {
-        await onPrintingChange(inst, parseInt(sel.value, 10));
+        const idx = parseInt(sel.value, 10);
+        if (inst.isBackFace) await onBackPrintingChange(inst, idx);
+        else await onPrintingChange(inst, idx);
         Preview.renderPage();
       });
       return sel;
@@ -509,18 +602,38 @@
       inst.enUrl = p.enUrl;
     }
 
-    // 为当前页中匹配该 oracleId 的卡格补/更新下拉：
+    // 双面牌背面陪伴卡的印刷切换：只改背面图，与正面解耦（对齐 mtgprint.net）
+    async function onBackPrintingChange(inst, idx) {
+      const p = inst.allPrintings[idx];
+      if (!p) return;
+      inst.selectedPrintingIdx = idx;
+      const preferZh = dom.optZh.checked;
+      const newInfo = {
+        enUrl: p.enUrl,
+        name: p.name,
+        oracleId: p.oracleId,
+        set: p.set,
+        collectorNumber: p.collectorNumber,
+      };
+      const r = await CardService.resolveBackFaceUrl(newInfo, preferZh);
+      inst.faceUrl = r.faceUrl;
+      inst.displayUrl = r.displayUrl;
+      inst.enUrl = p.enUrl;
+    }
+
+    // 为当前页中匹配 matchFn 的卡格补/更新下拉：
     //  - 尚无下拉 → 新建（可能是已 seed 的「仅当前印刷」版）
     //  - 已有下拉但仍是「仅当前印刷」版，且完整列表已到达 → 替换为完整版
-    function patchVisiblePrintingSelects(oid) {
+    function patchVisiblePrintingSelects(matchFn) {
       for (const wrap of dom.cardGrid.children) {
         const inst = wrap._inst;
-        if (!inst || inst.oracleId !== oid) continue;
+        if (!inst || !matchFn(inst)) continue;
         const existing = wrap.querySelector(".printing-select");
         // 已是完整版（选项数 ≥ 完整列表数）则无需重建
         if (
           existing &&
           inst._printingsFull &&
+          existing.options &&
           existing.options.length >= inst.allPrintings.length
         ) {
           continue;
@@ -531,43 +644,124 @@
       }
     }
 
-    // 后台异步加载每张卡的印刷版本下拉数据；不阻塞导入，失败可重试且不污染新牌表
-    async function loadPrintings(oracleIdList, cardInstances, gen) {
-      if (!oracleIdList.length) {
+    // 带重试地获取某查询的全部印刷：确定无数据(返回空数组)不重试；
+    // 仅在真正抛错(网络/限流抖动)时退避重试，避免【一次抖动就永久停在「仅当前1项」】。
+    // faceIndex：0=正面印刷，1=双面牌背面印刷。
+    async function fetchPrintsWithRetry(query, gen, attempts, faceIndex = 0) {
+      for (let a = 0; a < attempts; a++) {
+        if (gen !== state.loadGen) return null; // 已被新导入取代
+        try {
+          return await CardService.fetchAllPrintings(query, faceIndex); // 成功（含空数组=确定无数据）
+        } catch (e) {
+          console.warn(`印刷版本获取失败(第${a + 1}/${attempts}次重试)：`, query, e);
+          await new Promise((r) => setTimeout(r, 500 * Math.pow(2, a)));
+        }
+      }
+      return null;
+    }
+
+    // 后台异步加载每张卡（含双面牌背面）的印刷版本下拉数据；不阻塞导入。
+    // 失败会自动重试；若仍失败则保留已 seed 的当前印刷下拉（不消失，用户重导即可再试）。
+    //   oracleIdList：正面卡（按 oracle_id 查，faceIndex=0）
+    //   backFaceNames：双面牌背面（按背面卡名查，faceIndex=1）
+    async function loadPrintings(oracleIdList, backFaceNames, cardInstances, gen) {
+      if (!oracleIdList.length && !backFaceNames.length) {
         dom.setStatus(state.lastMsg + " · 印刷版本无需加载", "ok");
         return;
       }
-      const total = oracleIdList.length;
-      let failed = 0;
-      await mapLimit(oracleIdList, 4, async (oid) => {
-        if (gen !== state.loadGen) return; // 已被新的导入取代，放弃本批
-        let prints = null;
-        try {
-          prints = await CardService.fetchAllPrintings(oid);
-        } catch (e) {
-          failed++;
-          console.warn("印刷版本获取失败（保留当前印刷下拉）：", oid, e);
-          prints = null; // 失败：保留已 seed 的当前印刷，下拉框不消失、可重导重试
-        }
-        // 仅当拿到完整列表时才替换（printings 为空也保留 seed 的当前印刷）
-        if (prints && prints.length) {
-          for (const inst of cardInstances) {
-            if (inst.oracleId === oid) {
-              inst.allPrintings = prints;
-              inst._printingsFull = true;
-              const curIdx = prints.findIndex(
-                (p) => p.set === inst.set && p.collectorNumber === inst.collectorNumber
-              );
-              inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
-            }
+      const total = oracleIdList.length + backFaceNames.length;
+
+      // 把完整列表写回匹配该 query 的全部实例（仅当真正拿到数据）
+      const apply = (query, prints, matchFn) => {
+        if (!prints || !prints.length) return;
+        for (const inst of cardInstances) {
+          if (matchFn(inst)) {
+            inst.allPrintings = prints;
+            inst._printingsFull = true;
+            const curIdx = prints.findIndex(
+              (p) => p.set === inst.set && p.collectorNumber === inst.collectorNumber
+            );
+            inst.selectedPrintingIdx = curIdx >= 0 ? curIdx : 0;
           }
         }
-        if (gen === state.loadGen) patchVisiblePrintingSelects(oid);
-      });
+      };
+
+      const onePass = async (list, attempts, faceIndex, toQuery, matchFn) => {
+        await mapLimit(list, 4, async (key) => {
+          const query = toQuery(key);
+          const prints = await fetchPrintsWithRetry(query, gen, attempts, faceIndex);
+          // matchFn 形如 (inst, key) => boolean；这里把当前 key 闭包进去，
+          // 供 apply / patch 同时用于正面(oracleId)与背面(卡名)的匹配。
+          const matcher = (inst) => matchFn(inst, key);
+          apply(query, prints, matcher);
+          if (gen === state.loadGen) patchVisiblePrintingSelects(matcher);
+        });
+      };
+
+      // 第一遍：并发加载，每张卡最多重试 3 次
+      await onePass(
+        oracleIdList,
+        3,
+        0,
+        (oid) => ({ oracleId: oid }),
+        (inst, oid) => inst.oracleId === oid
+      );
       if (gen !== state.loadGen) return; // 被新导入取代
-      const ok = total - failed;
+
+      // 双面牌背面：按背面卡名查（faceIndex=1，取背面图）。
+      // 注：Scryfall 的 cards/named 不在 card_faces 内返回背面 oracle_id，
+      //     故改用「背面卡名精确搜索」拿背面印刷列表；实体双面牌正反面同系列同编号，
+      //     故当前印刷的 set/collector 能与背面列表对上。
+      await onePass(
+        backFaceNames,
+        3,
+        1,
+        (name) => ({ name }),
+        (inst, name) => inst.isBackFace && inst.backFaceName === name
+      );
+      if (gen !== state.loadGen) return;
+
+      // 补洞二遍：对仍停在「仅当前1项」(seed 未补全) 的查询稍等网络恢复后再补一次
+      const pendingOids = oracleIdList.filter((oid) =>
+        cardInstances.some((i) => i.oracleId === oid && i.found && !i._printingsFull)
+      );
+      const pendingNames = backFaceNames.filter((nm) =>
+        cardInstances.some((i) => i.isBackFace && i.backFaceName === nm && i.found && !i._printingsFull)
+      );
+      if (pendingOids.length || pendingNames.length) {
+        await new Promise((r) => setTimeout(r, 1200));
+        if (gen !== state.loadGen) return;
+        if (pendingOids.length) {
+          await onePass(
+            pendingOids,
+            2,
+            0,
+            (oid) => ({ oracleId: oid }),
+            (inst, oid) => inst.oracleId === oid
+          );
+          if (gen !== state.loadGen) return;
+        }
+        if (pendingNames.length) {
+          await onePass(
+            pendingNames,
+            2,
+            1,
+            (name) => ({ name }),
+            (inst, name) => inst.isBackFace && inst.backFaceName === name
+          );
+          if (gen !== state.loadGen) return;
+        }
+      }
+
+      const failed =
+        oracleIdList.filter((oid) =>
+          cardInstances.some((i) => i.oracleId === oid && i.found && !i._printingsFull)
+        ).length +
+        backFaceNames.filter((nm) =>
+          cardInstances.some((i) => i.isBackFace && i.backFaceName === nm && i.found && !i._printingsFull)
+        ).length;
       dom.setStatus(
-        state.lastMsg + ` · 印刷版本已加载（${ok}/${total} 种可切换）`,
+        state.lastMsg + ` · 印刷版本已加载（${total - failed}/${total} 种可切换）`,
         failed > 0 ? "error" : "ok"
       );
     }
@@ -623,6 +817,13 @@
           const badge = document.createElement("div");
           badge.className = "token-badge";
           badge.textContent = "指示物";
+          cell.appendChild(badge);
+        } else if (inst.isBackFace) {
+          // 双面牌背面陪伴卡角标
+          cell.classList.add("backface-cell");
+          const badge = document.createElement("div");
+          badge.className = "backface-badge";
+          badge.textContent = "背面 · " + (inst.frontName || "");
           cell.appendChild(badge);
         }
 
@@ -1054,6 +1255,8 @@
 
     // 解析每张实例的最终图（限流 + 中文图解析），并把关键信息挂到实例上
     const preferZh = dom.optZh.checked;
+    const includeBack = dom.optBackFace.checked;
+    const backCompanions = []; // 双面牌的背面陪伴卡（独立于正面，加入牌堆/预览/打印）
     await mapLimit(instances, 5, async (inst) => {
       const key = inst.set ? `${inst.name}|${inst.set}` : inst.name;
       const info = infoMap.get(key);
@@ -1063,8 +1266,14 @@
       inst.enUrl = info?.enUrl || null;
       inst.found = !!info;
       inst.oracleId = info?.oracleId || null;
+      // 双面牌：把卡名扩展成「正面 // 背面」，对齐 mtgprint.net 的展示
+      // （无论 Scryfall 返回的 name 是否已含 //，都以两面 face name 拼接为准）
+      if (info && info.cardFaces && info.cardFaces.length >= 2) {
+        inst.name = info.cardFaces[0].name + " // " + info.cardFaces[1].name;
+      }
       inst.set = info?.set || inst.set; // 用查到的实际系列/编号作为「当前印刷」
       inst.collectorNumber = info?.collectorNumber || null;
+      inst.isBackFace = false;
       // 立即把「当前印刷」种入 allPrintings（来自 lookupCard 结果），
       // 保证下拉框一定出现（参考 mtgprint.net：每张卡都有选择器，默认选中当前印刷）。
       // 后台再异步补充该卡的全部印刷版本；即使补充失败，下拉框也不会消失。
@@ -1085,7 +1294,51 @@
       }
       inst.selectedPrintingIdx = 0;
       inst._printingsFull = false; // 后台完整列表尚未加载
+
+      // 双面牌：抽取背面作为独立陪伴卡。
+      // 中文背面图：resolveFaceUrl 已据正面中文图推导（/front/→/back/，仅 large）；
+      // 若无中文（基础地/未勾选中文/该系列无中文），则回退 Scryfall 英文背面。
+      if (includeBack && info && info.cardFaces && info.cardFaces.length >= 2) {
+        const bf = info.cardFaces[1];
+        const bfEnUrl = bf.image_uris?.normal || null;
+        // 优先用中文背面图（r.backFaceUrl），否则回退英文背面
+        const backFace = r.backFaceUrl || (bfEnUrl ? proxify(bfEnUrl) : null);
+        const backDisplay = r.backDisplayUrl || bfEnUrl;
+        if (backFace) {
+          const backOracle = bf.oracle_id || null;
+          backCompanions.push({
+            name: bf.name,
+            faceUrl: backFace,
+            displayUrl: backDisplay,
+            enUrl: bfEnUrl, // 中文背面若 404，预览 onerror 回退英文背面
+            found: true,
+            oracleId: backOracle, // 多数情况下 null（cards/named 不返回背面 oracle_id）
+            backFaceName: bf.name, // 后台按此名查背面印刷列表（faceIndex=1）
+            set: info.set,
+            collectorNumber: info.collectorNumber,
+            isBackFace: true,
+            frontName: info.name, // 预览角标用：标明这是哪张正面的背面（用简明正面名）
+            allPrintings: [
+              {
+                id: bf.id || info.id + "-back",
+                name: bf.name,
+                set: info.set,
+                setName: info.setName || info.set,
+                collectorNumber: info.collectorNumber,
+                enUrl: bfEnUrl,
+                oracleId: backOracle,
+              },
+            ],
+            selectedPrintingIdx: 0,
+            // 背面也走后台加载全部印刷版本（按背面卡名查），保持「仅当前1项」直到加载完成
+            _printingsFull: false,
+          });
+        }
+      }
     });
+
+    // 把背面陪伴卡并入实例列表（位于各自正面卡之后；导出/预览/打印都会出现）
+    if (backCompanions.length) instances.push(...backCompanions);
 
     const totalCount = instances.length;
     const typeCount = uniqueCards.length;
@@ -1138,14 +1391,20 @@
     dom.exportBtn.disabled = false;
     dom.printBtn.disabled = false;
 
-    // 同一张卡（同 oracle_id）只查一次印刷版本，结果共享给所有同名实例
+    // 同一张卡（同 oracle_id / 同背面卡名）只查一次印刷版本，结果共享给所有同名实例
     const oracleIdList = [...new Set(instances.map((it) => it.oracleId).filter(Boolean))];
+    const backFaceNames = [
+      ...new Set(
+        instances.filter((it) => it.isBackFace && it.backFaceName).map((it) => it.backFaceName)
+      ),
+    ];
     const gen = state.bumpGen(); // 标记本次导入，避免旧的后台任务污染新牌表
-    Printing.loadPrintings(oracleIdList, instances, gen).catch((e) =>
+    Printing.loadPrintings(oracleIdList, backFaceNames, instances, gen).catch((e) =>
       console.warn("印刷版本加载异常：", e)
     );
 
     let msg = `导入成功：${totalCount} 张卡（${typeCount} 种）`;
+    if (backCompanions.length) msg += ` · 含 ${backCompanions.length} 张双面牌背面`;
     if (tokens.length) msg += ` · ${tokens.length} 个指示物`;
     if (missing > 0) msg += `；${missing} 张卡未找到，已用占位。`;
     else if (warned) msg += "；部分无法识别的行已跳过。";
@@ -1228,6 +1487,7 @@
       lookupCard: CardService.lookupCard,
       fetchAllPrintings: CardService.fetchAllPrintings,
       resolveFaceUrl: CardService.resolveFaceUrl,
+      resolveBackFaceUrl: CardService.resolveBackFaceUrl,
       buildTTSJson: Exporter.buildTTSJson,
       buildPrintingSelect: Printing.buildPrintingSelect,
       renderPage: Preview.renderPage,

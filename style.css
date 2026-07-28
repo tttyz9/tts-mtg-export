@@ -130,20 +130,6 @@ body {
   font-weight: 600;
   border-bottom-color: var(--primary);
 }
-.tab.disabled {
-  color: var(--ink-faint);
-  cursor: not-allowed;
-}
-.tab .soon {
-  font-size: 11px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 1px 5px;
-  margin-left: 4px;
-  color: var(--ink-faint);
-}
-
 .textarea-wrap {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -427,6 +413,70 @@ body {
     #ece3d6 8px,
     #ece3d6 16px
   );
+}
+/* 逐卡导入时的占位卡格（查询尚未到这张，保持转圈等待） */
+.card-cell.pending-cell {
+  background: repeating-linear-gradient(
+    45deg,
+    #f7f2ea,
+    #f7f2ea 8px,
+    #f0e9df 8px,
+    #f0e9df 16px
+  );
+}
+/* 查询失败/未找到的卡格：红斜纹 + 提示文字，点 ⟳ 可单独重试 */
+.card-cell.not-found {
+  background: repeating-linear-gradient(
+    45deg,
+    #fde8e8,
+    #fde8e8 8px,
+    #f8d7d7 8px,
+    #f8d7d7 16px
+  );
+}
+.card-cell .nf-tip {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  text-align: center;
+  font-size: 12px;
+  color: #a33;
+  pointer-events: none;
+}
+/* 单卡刷新按钮（卡格右上角 ⟳，悬停显现） */
+.cell-refresh {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(30, 27, 46, 0.62);
+  color: #fff;
+  font-size: 14px;
+  line-height: 24px;
+  text-align: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+}
+.card-cell:hover .cell-refresh {
+  opacity: 1;
+}
+.cell-refresh:hover {
+  background: var(--primary, #7c3aed);
+}
+.cell-refresh.busy {
+  opacity: 1;
+  cursor: wait;
+  animation: spin 0.8s linear infinite;
 }
 /* 指示物卡：金色描边 + 角标 */
 .card-cell.token-cell {

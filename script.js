@@ -405,6 +405,10 @@
             id: info.id,
             name: info.name,
             enUrl: pickEnUrl(info),
+            oracleId: info.oracle_id || null,
+            set: info.set || null,
+            setName: info.set_name || null,
+            collectorNumber: info.collector_number || null,
           }
         : null;
       if (result || !netErr) tokenCache.set(id, result);
@@ -692,9 +696,9 @@
       return null;
     }
 
-    // 后台异步加载每张卡（含双面牌背面）的印刷版本下拉数据；不阻塞导入。
+    // 后台异步加载每张卡（含双面牌背面、指示物）的印刷版本下拉数据；不阻塞导入。
     // 失败会自动重试；若仍失败则保留已 seed 的当前印刷下拉（不消失，用户重导即可再试）。
-    //   oracleIdList：正面卡（按 oracle_id 查，faceIndex=0）
+    //   oracleIdList：正面卡 / 指示物（按 oracle_id 查，faceIndex=0）
     //   backFaceNames：双面牌背面（按背面卡名查，faceIndex=1）
     async function loadPrintings(oracleIdList, backFaceNames, cardInstances, gen) {
       if (!oracleIdList.length && !backFaceNames.length) {
@@ -702,6 +706,17 @@
         return;
       }
       const total = oracleIdList.length + backFaceNames.length;
+
+      // 用实例中的卡名做进度提示（oracleId -> 卡名；背面卡名 -> 带角标提示）
+      const nameMap = new Map();
+      for (const inst of cardInstances) {
+        if (inst.oracleId && !nameMap.has(inst.oracleId)) {
+          nameMap.set(inst.oracleId, inst.name);
+        }
+        if (inst.isBackFace && inst.backFaceName && !nameMap.has(inst.backFaceName)) {
+          nameMap.set(inst.backFaceName, "背面 · " + (inst.frontName || inst.backFaceName));
+        }
+      }
 
       // 把完整列表写回匹配该 query 的全部实例（仅当真正拿到数据）
       const apply = (query, prints, matchFn) => {
@@ -718,8 +733,13 @@
         }
       };
 
+      let done = 0;
       const onePass = async (list, attempts, faceIndex, toQuery, matchFn) => {
         await mapLimit(list, 4, async (key) => {
+          if (gen !== state.loadGen) return;
+          done++;
+          const label = nameMap.get(key) || key;
+          dom.setStatus(`${state.lastMsg} · 正在加载印刷版本（${done}/${total}）：${label}`, "");
           const query = toQuery(key);
           const prints = await fetchPrintsWithRetry(query, gen, attempts, faceIndex);
           // matchFn 形如 (inst, key) => boolean；这里把当前 key 闭包进去，
@@ -1217,7 +1237,10 @@
             }
           });
         } catch (e) {
-          // 用户取消指示物选择 → 仅打印主牌
+          if (e === "cancel") {
+            dom.setStatus("已取消打印。", "");
+            return; // 用户主动取消整个打印（不再打印主牌）
+          }
         }
       }
 
@@ -1308,10 +1331,13 @@
   }
 
   // 双面牌：构建背面陪伴卡（每个正面实例一张）；非双面牌返回 null
-  function makeBackCompanion(info, r) {
-    if (!(info && info.cardFaces && info.cardFaces.length >= 2)) return null;
-    const bf = info.cardFaces[1];
-    const bfEnUrl = bf.image_uris?.normal || null;
+    function makeBackCompanion(info, r) {
+      if (!(info && info.cardFaces && info.cardFaces.length >= 2)) return null;
+      const bf = info.cardFaces[1];
+      // prepare / split / adventure 等布局虽然有两个 card_faces，但正背面共用
+      // 同一张卡图（背面没有独立的 image_uris），不应生成独立的背面陪伴卡。
+      if (!bf.image_uris) return null;
+      const bfEnUrl = bf.image_uris.normal || null;
     // 优先用中文背面图（r.backFaceUrl），否则回退英文背面
     const backFace = (r && r.backFaceUrl) || (bfEnUrl ? proxify(bfEnUrl) : null);
     const backDisplay = (r && r.backDisplayUrl) || bfEnUrl;
@@ -1351,13 +1377,34 @@
     const autoFix = dom.optFix.checked;
     try {
       if (inst.isToken) {
-        // 指示物：按 id 强制重查
+        // 指示物：按 id 强制重查，并重新种入当前印刷下拉
         const tk = await CardService.fetchTokenInfo(inst.tokenId, true);
         if (tk && tk.enUrl) {
           inst.name = tk.name;
           inst.faceUrl = proxify(tk.enUrl);
           inst.displayUrl = tk.enUrl;
           inst.enUrl = tk.enUrl;
+          inst.oracleId = tk.oracleId;
+          inst.set = tk.set;
+          inst.collectorNumber = tk.collectorNumber;
+          inst.allPrintings = [
+            {
+              id: tk.id,
+              name: tk.name,
+              set: tk.set,
+              setName: tk.setName || tk.set,
+              collectorNumber: tk.collectorNumber,
+              enUrl: tk.enUrl,
+              oracleId: tk.oracleId,
+            },
+          ];
+          inst.selectedPrintingIdx = 0;
+          inst._printingsFull = false;
+          // 刷新后后台补全该指示物的全部印刷版本
+          if (state.deckData && tk.oracleId) {
+            const all = [...state.deckData.instances, ...state.deckData.tokens];
+            Printing.loadPrintings([tk.oracleId], [], all, state.loadGen).catch(() => {});
+          }
         }
       } else if (inst.isBackFace) {
         // 双面牌背面：按当前选中印刷重查背面图（绕过 mtgch 缓存）
@@ -1539,10 +1586,10 @@
       if (backs.length) Preview.syncTail();
     };
 
-    // 受控并发查询（3 路）：每查完一张立即原位显示；查询失败的卡落地为
+    // 逐张顺序查询：一张一张来，每查完一张立即原位显示；查询失败的卡落地为
     // 「未找到」样式（红斜纹 + 提示），用户可点卡格 ⟳ 单独重试。
     let doneCnt = 0;
-    await mapLimit(uniqueCards, 3, async (uc) => {
+    await mapLimit(uniqueCards, 1, async (uc) => {
       if (gen !== state.loadGen) return; // 被新导入/清空取代，放弃
       let info = null;
       try {
@@ -1587,6 +1634,23 @@
           enUrl: tk.enUrl,
           isToken: true,
           found: true,
+          oracleId: tk.oracleId,
+          set: tk.set,
+          collectorNumber: tk.collectorNumber,
+          // 把当前印刷种入下拉，后台 loadPrintings 再补全完整列表
+          allPrintings: [
+            {
+              id: tk.id,
+              name: tk.name,
+              set: tk.set,
+              setName: tk.setName || tk.set,
+              collectorNumber: tk.collectorNumber,
+              enUrl: tk.enUrl,
+              oracleId: tk.oracleId,
+            },
+          ],
+          selectedPrintingIdx: 0,
+          _printingsFull: false,
         };
         tokens.push(tok);
         previewWithTokens.push(tok);
@@ -1606,13 +1670,15 @@
     dom.printBtn.disabled = false;
 
     // 同一张卡（同 oracle_id / 同背面卡名）只查一次印刷版本，结果共享给所有同名实例
-    const oracleIdList = [...new Set(instances.map((it) => it.oracleId).filter(Boolean))];
+    // 指示物也参与，使其能切换不同印刷版本
+    const allForPrintings = [...instances, ...tokens];
+    const oracleIdList = [...new Set(allForPrintings.map((it) => it.oracleId).filter(Boolean))];
     const backFaceNames = [
       ...new Set(
         instances.filter((it) => it.isBackFace && it.backFaceName).map((it) => it.backFaceName)
       ),
     ];
-    Printing.loadPrintings(oracleIdList, backFaceNames, instances, gen).catch((e) =>
+    Printing.loadPrintings(oracleIdList, backFaceNames, allForPrintings, gen).catch((e) =>
       log("印刷版本加载异常：", e)
     );
 

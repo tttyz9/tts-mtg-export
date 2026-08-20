@@ -517,7 +517,7 @@ body {
   cursor: wait;
   animation: spin 0.8s linear infinite;
 }
-/* 指示物卡：金色描边 + 角标 */
+/* 衍生物卡：金色描边 + 角标 */
 .card-cell.token-cell {
   border: 2px solid var(--gold);
 }

@@ -9,11 +9,11 @@
  *     - dom          : 视图层元素引用 + 状态文案 / HTML 转义（唯一接触 DOM 的入口）
  *     - state        : 应用唯一状态源（单一数据源，杜绝散落的可变全局）
  *     - ScryfallClient: Scryfall 限流 + 退避重试网络客户端（纯网络，无 DOM）
- *     - CardService  : 卡牌数据层（查卡 / 指示物 / 中文图 / 印刷版本）
+ *     - CardService  : 卡牌数据层（查卡 / 衍生物 / 中文图 / 印刷版本）
  *     - Printing     : 印刷版本下拉的构建与后台加载（UI 逻辑）
  *     - Preview      : 预览渲染（只读 state，写入 dom）
  *     - Exporter     : TTS JSON 生成与下载
- *     - Printer      : 打印页生成与指示物数量选择
+ *     - Printer      : 打印页生成与衍生物数量选择
  *     - importDeck   : 控制器，编排上述模块完成一次导入
  * ========================================================= */
 (function () {
@@ -266,7 +266,7 @@
   }
 
   // =========================================================
-  // CardService —— 卡牌数据层（查卡 / 指示物 / 中文图 / 印刷版本）
+  // CardService —— 卡牌数据层（查卡 / 衍生物 / 中文图 / 印刷版本）
   //   纯数据：不接触 DOM、不读写 state，仅通过返回值与调用方通信
   // =========================================================
   const CardService = (() => {
@@ -376,7 +376,7 @@
             collectorNumber: info.collector_number || null,
             // 双面牌需要：透传 card_faces，供 importDeck 抽取背面陪伴卡
             cardFaces: info.card_faces || null,
-            // 该卡在游戏中会生成的指示物（来自 all_parts 中 component === "token"）
+            // 该卡在游戏中会生成的衍生物（来自 all_parts 中 component === "token"）
             tokens: (info.all_parts || [])
               .filter((p) => p.component === "token")
               .map((p) => ({ id: p.id, name: p.name })),
@@ -388,17 +388,17 @@
       return result;
     }
 
-    // 按 Scryfall id 取指示物卡数据（带缓存；force=绕过缓存重新请求）
+    // 按 Scryfall id 取衍生物卡数据（带缓存；force=绕过缓存重新请求）
     async function fetchTokenInfo(id, force) {
       if (force) tokenCache.delete(id);
       if (tokenCache.has(id)) return tokenCache.get(id);
       let info = null;
-      let netErr = false; // 网络级失败不缓存 null，避免本会话内该指示物永远拿不到
+      let netErr = false; // 网络级失败不缓存 null，避免本会话内该衍生物永远拿不到
       try {
         info = await ScryfallClient.get(`https://api.scryfall.com/cards/${id}`);
       } catch (e) {
         netErr = true;
-        log("Scryfall 指示物查询失败：", id, e);
+        log("Scryfall 衍生物查询失败：", id, e);
       }
       const result = info
         ? {
@@ -724,9 +724,9 @@
       return null;
     }
 
-    // 后台异步加载每张卡（含双面牌背面、指示物）的印刷版本下拉数据；不阻塞导入。
+    // 后台异步加载每张卡（含双面牌背面、衍生物）的印刷版本下拉数据；不阻塞导入。
     // 失败会自动重试；若仍失败则保留已 seed 的当前印刷下拉（不消失，用户重导即可再试）。
-    //   oracleIdList：正面卡 / 指示物（按 oracle_id 查，faceIndex=0）
+    //   oracleIdList：正面卡 / 衍生物（按 oracle_id 查，faceIndex=0）
     //   backFaceNames：双面牌背面（按背面卡名查，faceIndex=1）
     async function loadPrintings(oracleIdList, backFaceNames, cardInstances, gen, force = false) {
       if (!oracleIdList.length && !backFaceNames.length) {
@@ -888,12 +888,12 @@
       name.textContent = inst.name;
       cell.appendChild(name);
 
-      // 指示物角标
+      // 衍生物角标
       if (inst.isToken) {
         cell.classList.add("token-cell");
         const badge = document.createElement("div");
         badge.className = "token-badge";
-        badge.textContent = "指示物";
+        badge.textContent = "衍生物";
         cell.appendChild(badge);
       } else if (inst.isBackFace) {
         // 双面牌背面陪伴卡角标
@@ -953,7 +953,7 @@
       updateCounters();
     }
 
-    // 列表尾部有新增（背面陪伴卡/指示物）：当前页有空位则整页补渲，否则只更新计数
+    // 列表尾部有新增（背面陪伴卡/衍生物）：当前页有空位则整页补渲，否则只更新计数
     function syncTail() {
       const total = state.preview.length;
       const start = state.page * state.PAGE_SIZE;
@@ -1035,7 +1035,7 @@
         GUID: guid,
       };
 
-      // 指示物作为独立 CardCustom 对象，排在主牌堆右侧的网格里（不混入牌堆）
+      // 衍生物作为独立 CardCustom 对象，排在主牌堆右侧的网格里（不混入牌堆）
       const objectStates = [deckState];
       const baseX = DECK_TRANSFORM.posX + 3.0;
       const baseZ = DECK_TRANSFORM.posZ;
@@ -1108,7 +1108,7 @@
   })();
 
   // =========================================================
-  // Printer —— 打印页生成与指示物数量选择（依赖 state、dom）
+  // Printer —— 打印页生成与衍生物数量选择（依赖 state、dom）
   // =========================================================
   const Printer = (() => {
     const PRINT_COLS = 3;
@@ -1170,7 +1170,7 @@
       setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
 
-    // 指示物打印数量选择弹窗
+    // 衍生物打印数量选择弹窗
     function chooseTokenCounts(tokens) {
       return new Promise((resolve, reject) => {
         const overlay = document.createElement("div");
@@ -1180,10 +1180,11 @@
         box.style.cssText =
           "background:var(--surface,#fff);color:var(--ink,#2d1b4e);border-radius:12px;padding:18px;max-width:520px;max-height:80vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4);font-family:var(--font);min-width:300px";
         box.innerHTML =
-          '<h3 style="margin:0 0 12px;font-size:16px">选择要打印的指示物数量</h3>' +
+          '<h3 style="margin:0 0 12px;font-size:16px">选择要打印的衍生物数量</h3>' +
           '<div id="tk-list"></div>' +
           '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">' +
           '<button id="tk-cancel" style="padding:8px 16px;border:0;border-radius:8px;background:#bbb;color:#fff;font-size:13px;font-weight:600;cursor:pointer">取消</button>' +
+          '<button id="tk-tokens" style="padding:8px 16px;border:0;border-radius:8px;background:var(--gold,#c9a227);color:#fff;font-size:13px;font-weight:600;cursor:pointer">只打印衍生物</button>' +
           '<button id="tk-ok" style="padding:8px 16px;border:0;border-radius:8px;background:var(--primary,#7c3aed);color:#fff;font-size:13px;font-weight:600;cursor:pointer">确认打印</button>' +
           "</div>";
         document.body.appendChild(overlay);
@@ -1203,7 +1204,7 @@
           };
           const nameSpan = document.createElement("span");
           nameSpan.style.cssText = "flex:1;font-size:13px";
-          nameSpan.textContent = t.name || "指示物";
+          nameSpan.textContent = t.name || "衍生物";
           const input = document.createElement("input");
           input.type = "number";
           input.min = "0";
@@ -1216,11 +1217,7 @@
           list.appendChild(row);
         });
         const close = () => overlay.remove();
-        box.querySelector("#tk-cancel").onclick = () => {
-          close();
-          reject("cancel");
-        };
-        box.querySelector("#tk-ok").onclick = () => {
+        const collectChosen = () => {
           const inputs = box.querySelectorAll("input[type=number]");
           const out = [];
           inputs.forEach((inp, i) => {
@@ -1234,13 +1231,26 @@
                 count: n,
               });
           });
+          return out;
+        };
+        box.querySelector("#tk-cancel").onclick = () => {
           close();
-          resolve(out);
+          reject("cancel");
+        };
+        box.querySelector("#tk-tokens").onclick = () => {
+          const out = collectChosen();
+          close();
+          resolve({ mode: "tokens", tokens: out });
+        };
+        box.querySelector("#tk-ok").onclick = () => {
+          const out = collectChosen();
+          close();
+          resolve({ mode: "all", tokens: out });
         };
       });
     }
 
-    // 主流程：拼装卡图清单 →（若有指示物）选数量 → 生成打印页
+    // 主流程：拼装卡图清单 →（若有衍生物）选数量 → 生成打印页
     async function printCards() {
       if (!state.deckData) {
         dom.setStatus("请先导入牌表再打印卡图。", "error");
@@ -1253,10 +1263,15 @@
         name: inst.name,
       }));
 
-      // 指示物：开启「自动导入指示物」且已收集到时才询问数量
+      // 衍生物：开启「自动导入衍生物」且已收集到时才询问数量
+      let tokensOnly = false;
       if (dom.optToken.checked && state.deckData.tokens && state.deckData.tokens.length) {
         try {
-          const chosen = await chooseTokenCounts(state.deckData.tokens);
+          const { mode, tokens: chosen } = await chooseTokenCounts(state.deckData.tokens);
+          if (mode === "tokens") {
+            tokensOnly = true;
+            items.length = 0; // 只打印衍生物：清空主牌
+          }
           chosen.forEach((t) => {
             for (let i = 0; i < t.count; i++) {
               items.push({
@@ -1281,7 +1296,9 @@
       openPrintHtml(buildPrintHtml(items));
       const totalPages = Math.ceil(items.length / PRINT_PER_PAGE);
       dom.setStatus(
-        `已生成打印页面（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可；指示物已一并包含。`,
+        tokensOnly
+          ? `已生成衍生物打印页面（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可。`
+          : `已生成打印页面（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可；衍生物已一并包含。`,
         "ok"
       );
     }
@@ -1407,7 +1424,7 @@
     const autoFix = dom.optFix.checked;
     try {
       if (inst.isToken) {
-        // 指示物：按 id 强制重查，并重新种入当前印刷下拉
+        // 衍生物：按 id 强制重查，并重新种入当前印刷下拉
         const tk = await CardService.fetchTokenInfo(inst.tokenId, true);
         if (tk && tk.enUrl) {
           inst.name = tk.name;
@@ -1430,7 +1447,7 @@
           ];
           inst.selectedPrintingIdx = 0;
           inst._printingsFull = false;
-          // 刷新后后台补全该指示物的全部印刷版本
+          // 刷新后后台补全该衍生物的全部印刷版本
           if (state.deckData && tk.oracleId) {
             const all = [...state.deckData.instances, ...state.deckData.tokens];
             Printing.loadPrintings([tk.oracleId], [], all, state.loadGen).catch(() => {});
@@ -1474,7 +1491,7 @@
           if (oids.length || bnames.length) {
             Printing.loadPrintings(oids, bnames, state.deckData ? state.deckData.instances : insts, state.loadGen).catch(() => {});
           }
-          // 该卡生成的指示物（若开启且此前没拿到）
+          // 该卡生成的衍生物（若开启且此前没拿到）
           if (dom.optToken.checked && info.tokens && info.tokens.length && state.deckData) {
             for (const t of info.tokens) {
               if (state.deckData.tokens.some((x) => x.tokenId === t.id)) continue;
@@ -1535,7 +1552,7 @@
       const bn = inst.backFaceName || inst.name;
       if (bn) targetBnames = [bn]; // 双面牌背面按背面卡名查
     } else if (inst.oracleId) {
-      targetOids = [inst.oracleId]; // 正面/指示物按 oracle_id 查
+      targetOids = [inst.oracleId]; // 正面/衍生物按 oracle_id 查
     }
 
     // 强制重解析当前选中印刷的卡图（绕过 mtgch 缓存重拉中文图）
@@ -1637,7 +1654,7 @@
     dom.statTypes.textContent = uniqueCards.length;
     dom.statTokens.textContent = "0";
 
-    // 指示物：逐卡过程中【只收集不请求】（按 id 去重），全部卡完成后再统一请求
+    // 衍生物：逐卡过程中【只收集不请求】（按 id 去重），全部卡完成后再统一请求
     const pendingTokens = new Map(); // id -> name
 
     // 把某个 key 的查询结果应用到它的所有实例，并即时刷新预览中对应卡格
@@ -1651,7 +1668,7 @@
           if (bc) backs.push(bc);
         }
       }
-      // 收集该卡会生成的指示物（先存起来，最后统一请求）
+      // 收集该卡会生成的衍生物（先存起来，最后统一请求）
       if (dom.optToken.checked && info && info.tokens) {
         for (const t of info.tokens) {
           if (!pendingTokens.has(t.id)) pendingTokens.set(t.id, t.name);
@@ -1692,17 +1709,17 @@
     const missing = instances.filter((it) => !it.found).length;
     const backCount = instances.filter((it) => it.isBackFace).length;
 
-    // 指示物：逐卡阶段只收集，现在（最后）统一逐个请求，每到一个就追加进预览
+    // 衍生物：逐卡阶段只收集，现在（最后）统一逐个请求，每到一个就追加进预览
     let tokenMissing = 0;
     if (dom.optToken.checked && pendingTokens.size) {
-      // 预览切换为「实例 + 指示物」的新数组，避免把指示物混进 instances
+      // 预览切换为「实例 + 衍生物」的新数组，避免把衍生物混进 instances
       const previewWithTokens = instances.slice();
       state.preview = previewWithTokens;
       let ti = 0;
       for (const [id, tname] of pendingTokens) {
         if (gen !== state.loadGen) return;
         ti++;
-        dom.setStatus(`正在查询指示物 ${ti}/${pendingTokens.size}：${tname} …`, "");
+        dom.setStatus(`正在查询衍生物 ${ti}/${pendingTokens.size}：${tname} …`, "");
         const tk = await CardService.fetchTokenInfo(id);
         if (!tk || !tk.enUrl) {
           tokenMissing++;
@@ -1738,7 +1755,7 @@
         previewWithTokens.push(tok);
         state.deckData.tokenCount = tokens.length;
         dom.statTokens.textContent = tokens.length;
-        Preview.syncTail(); // 每到一个指示物就即时显示
+        Preview.syncTail(); // 每到一个衍生物就即时显示
       }
     }
 
@@ -1752,7 +1769,7 @@
     dom.printBtn.disabled = false;
 
     // 同一张卡（同 oracle_id / 同背面卡名）只查一次印刷版本，结果共享给所有同名实例
-    // 指示物也参与，使其能切换不同印刷版本
+    // 衍生物也参与，使其能切换不同印刷版本
     const allForPrintings = [...instances, ...tokens];
     const oracleIdList = [...new Set(allForPrintings.map((it) => it.oracleId).filter(Boolean))];
     const backFaceNames = [
@@ -1766,10 +1783,10 @@
 
     let msg = `导入成功：${totalCount} 张卡（${typeCount} 种）`;
     if (backCount) msg += ` · 含 ${backCount} 张双面牌背面`;
-    if (tokens.length) msg += ` · ${tokens.length} 个指示物`;
+    if (tokens.length) msg += ` · ${tokens.length} 个衍生物`;
     if (missing > 0) msg += `；${missing} 张卡未找到，已用占位（可点卡格 ⟳ 重试）。`;
     else if (warned) msg += "；部分无法识别的行已跳过。";
-    if (tokenMissing > 0) msg += `；${tokenMissing} 个指示物获取失败已跳过。`;
+    if (tokenMissing > 0) msg += `；${tokenMissing} 个衍生物获取失败已跳过。`;
     state.lastMsg = msg;
     dom.importBtn.disabled = false;
     // 卡图已就绪，印刷版本在后台继续加载

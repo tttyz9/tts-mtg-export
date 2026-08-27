@@ -1116,7 +1116,7 @@
     const PRINT_PER_PAGE = PRINT_COLS * PRINT_ROWS;
 
     // 构建自包含的打印 HTML（每页 9 张，A4 分页）
-    function buildPrintHtml(items) {
+    function buildPrintHtml(items, compact) {
       let pages = "";
       for (let p = 0; p < items.length; p += PRINT_PER_PAGE) {
         let rows = "";
@@ -1138,16 +1138,12 @@
         }
         pages += `<table class="pg">${rows}</table>`;
       }
+      const css = compact
+        ? "@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}table.pg{width:190.5mm;height:266.7mm;margin:0;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}table.pg:last-child{page-break-after:auto}table.pg td{width:63.5mm;height:88.9mm;padding:0;line-height:0;font-size:0;border:none}table.pg td img{width:63.5mm;height:88.9mm;display:block;object-fit:cover;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}"
+        : "@page{size:A4 portrait;margin:2.5mm}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}table.pg{width:205mm;height:292mm;margin:0 auto;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}table.pg:last-child{page-break-after:auto}table.pg td{width:68.333mm;height:97.333mm;padding:0;text-align:center;vertical-align:middle;border:none}table.pg td img{width:62.5mm;height:87mm;display:block;object-fit:cover;margin:0 auto}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}";
       return (
         "<!DOCTYPE html><html lang=\"zh\"><head><meta charset=\"utf-8\"><title>MTG 卡图打印</title><style>" +
-        "@page{size:A4 portrait;margin:2.5mm}" +
-        "*{margin:0;padding:0;box-sizing:border-box}" +
-        "body{background:#fff}" +
-        "table.pg{width:205mm;height:292mm;margin:0 auto;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}" +
-        "table.pg:last-child{page-break-after:auto}" +
-        "table.pg td{width:68.333mm;height:97.333mm;padding:0;text-align:center;vertical-align:middle;border:none}" +
-        "table.pg td img{width:62.5mm;height:87mm;display:block;object-fit:cover;margin:0 auto}" +
-        "@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}" +
+        css +
         "</style></head><body>" + pages +
         "<script>window.onload=function(){window.print()};<\/script></body></html>"
       );
@@ -1179,43 +1175,54 @@
         const box = document.createElement("div");
         box.style.cssText =
           "background:var(--surface,#fff);color:var(--ink,#2d1b4e);border-radius:12px;padding:18px;max-width:520px;max-height:80vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4);font-family:var(--font);min-width:300px";
+        const hasTokens = !!(tokens && tokens.length);
         box.innerHTML =
-          '<h3 style="margin:0 0 12px;font-size:16px">选择要打印的衍生物数量</h3>' +
+          '<h3 style="margin:0 0 12px;font-size:16px">' +
+          (hasTokens ? "选择要打印的衍生物数量" : "打印选项") +
+          '</h3>' +
           '<div id="tk-list"></div>' +
+          '<label style="display:flex;align-items:center;gap:8px;margin:10px 0 0;font-size:13px;cursor:pointer">' +
+          '<input type="checkbox" id="tk-compact">' +
+          '<span>紧凑打印（9 张卡图贴边无间隙，从纸张左上角起排）</span>' +
+          '</label>' +
           '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">' +
           '<button id="tk-cancel" style="padding:8px 16px;border:0;border-radius:8px;background:#bbb;color:#fff;font-size:13px;font-weight:600;cursor:pointer">取消</button>' +
-          '<button id="tk-tokens" style="padding:8px 16px;border:0;border-radius:8px;background:var(--gold,#c9a227);color:#fff;font-size:13px;font-weight:600;cursor:pointer">只打印衍生物</button>' +
+          '<button id="tk-tokens" style="padding:8px 16px;border:0;border-radius:8px;background:var(--gold,#c9a227);color:#fff;font-size:13px;font-weight:600;cursor:pointer' +
+          (hasTokens ? "" : ";display:none") +
+          '">只打印衍生物</button>' +
           '<button id="tk-ok" style="padding:8px 16px;border:0;border-radius:8px;background:var(--primary,#7c3aed);color:#fff;font-size:13px;font-weight:600;cursor:pointer">确认打印</button>' +
           "</div>";
         document.body.appendChild(overlay);
         overlay.appendChild(box);
         const list = box.querySelector("#tk-list");
-        tokens.forEach((t) => {
-          const row = document.createElement("div");
-          row.style.cssText = "display:flex;align-items:center;gap:10px;margin:6px 0";
-          const dUrl = getCardImage(t, "print");
-          const fUrl = t.enUrl || "";
-          const thumb = document.createElement("img");
-          thumb.src = dUrl;
-          thumb.style.cssText =
-            "width:48px;height:67px;object-fit:cover;border-radius:4px;border:1px solid var(--border,#ccc);flex-shrink:0";
-          thumb.onerror = () => {
-            if (fUrl && thumb.src !== fUrl) thumb.src = fUrl;
-          };
-          const nameSpan = document.createElement("span");
-          nameSpan.style.cssText = "flex:1;font-size:13px";
-          nameSpan.textContent = t.name || "衍生物";
-          const input = document.createElement("input");
-          input.type = "number";
-          input.min = "0";
-          input.value = "1";
-          input.style.cssText =
-            "width:56px;text-align:center;font-size:13px;padding:3px;border:1px solid #ccc;border-radius:4px";
-          row.appendChild(thumb);
-          row.appendChild(nameSpan);
-          row.appendChild(input);
-          list.appendChild(row);
-        });
+        if (hasTokens) {
+          tokens.forEach((t) => {
+            const row = document.createElement("div");
+            row.style.cssText = "display:flex;align-items:center;gap:10px;margin:6px 0";
+            const dUrl = getCardImage(t, "print");
+            const fUrl = t.enUrl || "";
+            const thumb = document.createElement("img");
+            thumb.src = dUrl;
+            thumb.style.cssText =
+              "width:48px;height:67px;object-fit:cover;border-radius:4px;border:1px solid var(--border,#ccc);flex-shrink:0";
+            thumb.onerror = () => {
+              if (fUrl && thumb.src !== fUrl) thumb.src = fUrl;
+            };
+            const nameSpan = document.createElement("span");
+            nameSpan.style.cssText = "flex:1;font-size:13px";
+            nameSpan.textContent = t.name || "衍生物";
+            const input = document.createElement("input");
+            input.type = "number";
+            input.min = "0";
+            input.value = "1";
+            input.style.cssText =
+              "width:56px;text-align:center;font-size:13px;padding:3px;border:1px solid #ccc;border-radius:4px";
+            row.appendChild(thumb);
+            row.appendChild(nameSpan);
+            row.appendChild(input);
+            list.appendChild(row);
+          });
+        }
         const close = () => overlay.remove();
         const collectChosen = () => {
           const inputs = box.querySelectorAll("input[type=number]");
@@ -1239,18 +1246,20 @@
         };
         box.querySelector("#tk-tokens").onclick = () => {
           const out = collectChosen();
+          const comp = box.querySelector("#tk-compact").checked;
           close();
-          resolve({ mode: "tokens", tokens: out });
+          resolve({ mode: "tokens", tokens: out, compact: comp });
         };
         box.querySelector("#tk-ok").onclick = () => {
           const out = collectChosen();
+          const comp = box.querySelector("#tk-compact").checked;
           close();
-          resolve({ mode: "all", tokens: out });
+          resolve({ mode: "all", tokens: out, compact: comp });
         };
       });
     }
 
-    // 主流程：拼装卡图清单 →（若有衍生物）选数量 → 生成打印页
+    // 主流程：拼装卡图清单 → 弹窗选数量与方式（始终弹出）→ 生成打印页
     async function printCards() {
       if (!state.deckData) {
         dom.setStatus("请先导入牌表再打印卡图。", "error");
@@ -1263,29 +1272,31 @@
         name: inst.name,
       }));
 
-      // 衍生物：开启「自动导入衍生物」且已收集到时才询问数量
+      // 弹窗始终弹出：有衍生物时选数量、无衍生物时仅选紧凑布局
       let tokensOnly = false;
-      if (dom.optToken.checked && state.deckData.tokens && state.deckData.tokens.length) {
-        try {
-          const { mode, tokens: chosen } = await chooseTokenCounts(state.deckData.tokens);
-          if (mode === "tokens") {
-            tokensOnly = true;
-            items.length = 0; // 只打印衍生物：清空主牌
+      let compact = false;
+      const tokenList =
+        dom.optToken.checked && state.deckData.tokens ? state.deckData.tokens : [];
+      try {
+        const { mode, tokens: chosen, compact: comp } = await chooseTokenCounts(tokenList);
+        compact = comp;
+        if (mode === "tokens") {
+          tokensOnly = true;
+          items.length = 0; // 只打印衍生物：清空主牌
+        }
+        chosen.forEach((t) => {
+          for (let i = 0; i < t.count; i++) {
+            items.push({
+              faceUrl: getCardImage(t, "print"),
+              enUrl: t.enUrl,
+              name: t.name,
+            });
           }
-          chosen.forEach((t) => {
-            for (let i = 0; i < t.count; i++) {
-              items.push({
-                faceUrl: getCardImage(t, "print"),
-                enUrl: t.enUrl,
-                name: t.name,
-              });
-            }
-          });
-        } catch (e) {
-          if (e === "cancel") {
-            dom.setStatus("已取消打印。", "");
-            return; // 用户主动取消整个打印（不再打印主牌）
-          }
+        });
+      } catch (e) {
+        if (e === "cancel") {
+          dom.setStatus("已取消打印。", "");
+          return; // 用户主动取消整个打印（不再打印主牌）
         }
       }
 
@@ -1293,12 +1304,13 @@
         dom.setStatus("没有可打印的卡图。", "error");
         return;
       }
-      openPrintHtml(buildPrintHtml(items));
+      openPrintHtml(buildPrintHtml(items, compact));
       const totalPages = Math.ceil(items.length / PRINT_PER_PAGE);
+      const layoutNote = compact ? "紧凑打印（卡图贴边无间隙）" : "普通打印";
       dom.setStatus(
-        tokensOnly
-          ? `已生成衍生物打印页面（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可。`
-          : `已生成打印页面（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可；衍生物已一并包含。`,
+        (tokensOnly ? `已生成衍生物${layoutNote}页面` : `已生成${layoutNote}页面`) +
+          `（${items.length} 张 · 约 ${totalPages} 页 A4），在弹出窗口按打印即可` +
+          (tokensOnly ? "。" : "；衍生物已一并包含。"),
         "ok"
       );
     }

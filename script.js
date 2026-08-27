@@ -1134,12 +1134,17 @@
               cells += "<td></td>";
             }
           }
-          rows += "<tr>" + cells + "</tr>";
-        }
-        pages += `<table class="pg">${rows}</table>`;
+      rows += "<tr>" + cells + "</tr>";
+    }
+    const tableHtml = `<table class="pg">${rows}</table>`;
+    // 紧凑模式：卡图贴边平铺后，仅在内部接缝处叠加虚线裁剪指引（不画外框、不撑开间隙）
+    const overlay = compact
+      ? '<div class="crop"><i class="cv" style="left:33.333%"></i><i class="cv" style="left:66.666%"></i><i class="ch" style="top:33.333%"></i><i class="ch" style="top:66.666%"></i></div>'
+      : "";
+    pages += compact ? `<div class="page">${tableHtml}${overlay}</div>` : tableHtml;
       }
       const css = compact
-        ? "@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}table.pg{width:190.5mm;height:266.7mm;margin:0;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}table.pg:last-child{page-break-after:auto}table.pg td{width:63.5mm;height:88.9mm;padding:0;line-height:0;font-size:0;border:none}table.pg td img{width:63.5mm;height:88.9mm;display:block;object-fit:cover;margin:0}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}"
+        ? "@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}.page{position:relative;width:190.5mm;height:266.7mm;margin:0;page-break-after:always;page-break-inside:avoid}.page:last-child{page-break-after:auto}table.pg{width:190.5mm;height:266.7mm;margin:0;border-collapse:collapse;table-layout:fixed}table.pg td{width:63.5mm;height:88.9mm;padding:0;line-height:0;font-size:0;border:none}table.pg td img{width:100%;height:100%;display:block;object-fit:cover;margin:0}.crop{position:absolute;inset:0;pointer-events:none;z-index:2}.crop .cv{position:absolute;top:0;bottom:0;width:0;border-left:1.5px dashed #fff;transform:translateX(-0.75px)}.crop .ch{position:absolute;left:0;right:0;height:0;border-top:1.5px dashed #fff;transform:translateY(-0.75px)}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}"
         : "@page{size:A4 portrait;margin:2.5mm}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}table.pg{width:205mm;height:292mm;margin:0 auto;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}table.pg:last-child{page-break-after:auto}table.pg td{width:68.333mm;height:97.333mm;padding:0;text-align:center;vertical-align:middle;border:none}table.pg td img{width:62.5mm;height:87mm;display:block;object-fit:cover;margin:0 auto}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}";
       return (
         "<!DOCTYPE html><html lang=\"zh\"><head><meta charset=\"utf-8\"><title>MTG 卡图打印</title><style>" +

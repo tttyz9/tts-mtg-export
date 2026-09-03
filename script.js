@@ -1144,13 +1144,41 @@
     pages += compact ? `<div class="page">${tableHtml}${overlay}</div>` : tableHtml;
       }
       const css = compact
-        ? "@page{size:A4 portrait;margin:0}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}.page{position:relative;width:190.5mm;height:266.7mm;margin:0;page-break-after:always;page-break-inside:avoid}.page:last-child{page-break-after:auto}table.pg{width:190.5mm;height:266.7mm;margin:0;border-collapse:collapse;table-layout:fixed}table.pg td{width:63.5mm;height:88.9mm;padding:0;line-height:0;font-size:0;border:none}table.pg td img{width:100%;height:100%;display:block;object-fit:cover;margin:0}.crop{position:absolute;inset:0;pointer-events:none;z-index:2}.crop .cv{position:absolute;top:0;bottom:0;width:0;border-left:1.5px dashed #fff;transform:translateX(-0.75px)}.crop .ch{position:absolute;left:0;right:0;height:0;border-top:1.5px dashed #fff;transform:translateY(-0.75px)}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}"
-        : "@page{size:A4 portrait;margin:2.5mm}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}table.pg{width:205mm;height:292mm;margin:0 auto;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}table.pg:last-child{page-break-after:auto}table.pg td{width:68.333mm;height:97.333mm;padding:0;text-align:center;vertical-align:middle;border:none}table.pg td img{width:62.5mm;height:87mm;display:block;object-fit:cover;margin:0 auto}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}";
+        ? ":root{--sc:1}@page{size:A4 portrait;margin:2.5mm}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}" +
+          ".page{position:relative;width:calc(190.5mm * var(--sc));height:calc(266.7mm * var(--sc));margin:0 auto;page-break-after:always;page-break-inside:avoid}" +
+          ".page:last-child{page-break-after:auto}" +
+          "table.pg{width:calc(190.5mm * var(--sc));height:calc(266.7mm * var(--sc));margin:0;border-collapse:collapse;table-layout:fixed}" +
+          "table.pg td{width:calc(63.5mm * var(--sc));height:calc(88.9mm * var(--sc));padding:0;line-height:0;font-size:0;border:none}" +
+          "table.pg td img{width:100%;height:100%;display:block;object-fit:cover;margin:0}" +
+          ".crop{position:absolute;inset:0;pointer-events:none;z-index:2}" +
+          ".crop .cv{position:absolute;top:0;bottom:0;width:0;border-left:1.5px dashed #fff;transform:translateX(-0.75px)}" +
+          ".crop .ch{position:absolute;left:0;right:0;height:0;border-top:1.5px dashed #fff;transform:translateY(-0.75px)}" +
+          "@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.toolbar{display:none}}"
+        : ":root{--sc:1}@page{size:A4 portrait;margin:2.5mm}*{margin:0;padding:0;box-sizing:border-box}body{background:#fff}" +
+          "table.pg{width:calc(205mm * var(--sc));height:calc(292mm * var(--sc));margin:0 auto;border-collapse:collapse;table-layout:fixed;page-break-after:always;page-break-inside:avoid}" +
+          "table.pg:last-child{page-break-after:auto}" +
+          "table.pg td{width:calc(68.333mm * var(--sc));height:calc(97.333mm * var(--sc));padding:0;text-align:center;vertical-align:middle;border:none}" +
+          "table.pg td img{width:calc(62.5mm * var(--sc));height:calc(87mm * var(--sc));display:block;object-fit:cover;margin:0 auto}" +
+          "@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.toolbar{display:none}}";
+      const toolbar =
+        '<div class="toolbar">' +
+        '<span>卡图大小</span>' +
+        '<input type="range" id="pscale" min="50" max="100" step="any" value="100" style="flex:1;accent-color:#7c3aed">' +
+        '<span id="pval" style="width:42px;text-align:right">100%</span>' +
+        '<button id="pprint" style="padding:6px 14px;border:0;border-radius:6px;background:#7c3aed;color:#fff;font-size:13px;font-weight:600;cursor:pointer">打印</button>' +
+        '</div>';
+      const script =
+        '<script>' +
+        'var root=document.documentElement,sl=document.getElementById("pscale"),pv=document.getElementById("pval");' +
+        'if(sl){sl.addEventListener("input",function(){var r=sl.value/100;var v=Math.round(sl.value);root.style.setProperty("--sc",r);pv.textContent=v+"%";});}' +
+        'var pb=document.getElementById("pprint");if(pb){pb.addEventListener("click",function(){window.print();});}' +
+        '<\/script>';
       return (
         "<!DOCTYPE html><html lang=\"zh\"><head><meta charset=\"utf-8\"><title>MTG 卡图打印</title><style>" +
         css +
-        "</style></head><body>" + pages +
-        "<script>window.onload=function(){window.print()};<\/script></body></html>"
+        ".toolbar{position:sticky;top:0;z-index:9999;display:flex;align-items:center;gap:12px;padding:8px 14px;background:#2d1b4e;color:#fff;font-family:sans-serif;font-size:13px}" +
+        "</style></head><body>" + toolbar + pages + script +
+        "</body></html>"
       );
     }
 
